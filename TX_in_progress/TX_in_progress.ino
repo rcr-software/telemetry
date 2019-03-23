@@ -7,6 +7,8 @@
 // __________________________________________________________________
 // *** HEADER FILES ***
 
+//#include <stdio.h>
+//#include <string.h>
 #include <SPI.h>
 #include <SD.h>
 #include <Wire.h>
@@ -59,21 +61,16 @@ BLA::Matrix<3,3> Q_k = {1,   0,   0,
                         0,   0, 0.2};
 
 BLA::Matrix<3,3> R_k = {0.5, 0, 0,
-                        0, 4, 0,
-                        0, 0, 7};
+                          0, 4, 0,
+                          0, 0, 7};
 
-BLA::Matrix<3,3> p_k = {0, 0, 0,
-                        0, 0, 0,
-                        0, 0, 0};
-
-BLA::Matrix<3> x_k = {0,0,0};
 // __________________________________________________________________
 // *** VALUES ***
 #define DEBUG false                               // Used for debugging purposes
 #define VBATPIN A7                                // Analog reading of battery voltage
 #define LED 13                                    // LED on Adalogger
 #define SEPARATE 11                               // Separate Pin - Pull Down Resistor
-float timeNow,timeLast,timeLog,delta_t = 0;       // Time values
+float timeNow,timeLast,timeLog;                   // Time values
 char fileName[20];                                // .csv file, dynamically named "telemetryData_#"
 const uint8_t packetSize = 60;                    // Use this value to change the radio packet size
 char radioPacket[packetSize];                     // char array used for radio packet transmission
@@ -81,14 +78,24 @@ float vbat;                                       // Voltage reading of connecte
 float gpsLat, gpsLon;                             // GPS Latitude and Longitude
 bool separation;                                  // Will return TRUE if vehicle separation has occurred
 String dataString;                                // String used for radio packet transmission
-float alt, alt0;                                  // BMP280 altitude reading
+float alt0;                                       // BMP280 altitude reading
 int temperature;                                  // BMP280 temperature reading
 uint8_t buf[RH_RF95_MAX_MESSAGE_LEN];             // Used for packet retrieval 
 uint8_t len = sizeof(buf);                        // Used for packet retrieval
 sensors_event_t event;                            // Event capture for LIS3DH accelerometer readings
-float xL,yL,zL,xG,yG,zG,accel,vel,velPrev;        // Values for BNO055 (p == previous value)
 float SeaLvlPressure = 1019.5;                    // NOTE: Update with current sea level pressure
-// Go to: https://forecast.weather.gov for Barometer readings
+                                                  // Go to: https://forecast.weather.gov for Barometer readings
+//float alt, vel, accel, delta_t
+
+struct stateStruct  {
+  float alt, vel, accel, delta_t;
+};
+//std::ostringstream ss;
+
+
+
+
+
 // __________________________________________________________________
 // *** SETUP ***
 
@@ -223,11 +230,19 @@ void setup()  {
     alt0 = bmp.readAltitude(SeaLvlPressure);
 
 }   // END SETUP
+
+
+
+
+
+
+
 // __________________________________________________________________
 // *** LOOP ***
 // *** Will send TX packet containing: [Time, Altitude, Vel, Acceleration, GPS Lat & Lon, Temperature, Vbat, Separation] ***
 
 void loop() {
+    struct stateStruct rawState, filteredState;
     if (separation == 0)  {
         delay(100);
     }
@@ -254,13 +269,14 @@ void loop() {
     temperature = bmp.readTemperature();
 
     // Read Altitude
-    alt = bmp.readAltitude(SeaLvlPressure) - alt0;
+    rawState.alt = bmp.readAltitude(SeaLvlPressure) - alt0;
 
     // Read Time
     timeNow = millis();
     timeNow /= 1000;
 
     // Get Acceleration Vector Values
+    float xL,yL,zL,xG,yG,zG,velPrev;                  // Acceleration Values (p == previous value)
     imu::Vector<3> gravity = bno.getVector(Adafruit_BNO055::VECTOR_GRAVITY);
     lis.getEvent(&event);
 
@@ -270,11 +286,11 @@ void loop() {
     xL = (float)event.acceleration.x;
     yL = (float)event.acceleration.y; 
     zL = (float)event.acceleration.z;
-    accel = ((xL - xG) + (yL - yG) + (zL - zG));
+    rawState.accel = ((xL - xG) + (yL - yG) + (zL - zG));
 
 
     // Calculate Velocity from Acceleration Reading
-    vel = (accel*delta_t) + velPrev;
+    rawState.vel = (rawState.accel*rawState.delta_t) + velPrev;
 
 #if DEBUG
     Serial << "Alt: " << alt << '\n';
@@ -285,18 +301,22 @@ void loop() {
 #endif
 
     // KALMAN FILTER:
-    kalmanFilter();
+    kalmanFilter(rawState, &filteredState);
 
     // Update previous time and velocity
-    velPrev = vel;
-    timeLog += delta_t;
+    velPrev = filteredState.vel;
+    timeLog += filteredState.delta_t;
+
+    // Append Struct Data
+    // need to think about this one.
+
 
     // Append Data
     if (timeLog > 0.5) {
         dataString  = String(timeNow) + ",";
-        dataString += String(alt) + ",";
-        dataString += String(vel) + ",";
-        dataString += String(accel) + ",";
+        dataString += String(filteredState.alt) + ",";
+        dataString += String(filteredState.vel) + ",";
+        dataString += String(filteredState.accel) + ",";
         dataString += String(gpsLat) + ",";
         dataString += String(gpsLon) + ",";
         dataString += String(temperature) + ",";
@@ -312,6 +332,13 @@ void loop() {
     dataFile.close();
 }
 
+
+
+
+
+
+
+
 // __________________________________________________________________
 // *** Radio Message Function ***
 void sendMsg(String dataString) {
@@ -321,28 +348,38 @@ void sendMsg(String dataString) {
     digitalWrite(LED,LOW);
 }
 
+
+
+
+
+
+
 // __________________________________________________________________
 // *** KALMAN FILTER FUNCTION ***
-void kalmanFilter() {
-    BLA::Matrix<3> z_k;
+void kalmanFilter(struct stateStruct rawState, struct stateStruct* filteredState) {
+    static BLA::Matrix<3,3> p_k = {0, 0, 0,
+                                   0, 0, 0,
+                                   0, 0, 0};
+    static BLA::Matrix<3> x_k = {0,0,0};
+    BLA::Matrix<3>   z_k;
     BLA::Matrix<3,3> k_gain;
-    BLA::Matrix<3> tempMat;
-    BLA::Matrix<3> tempMat_1;
-    BLA::Matrix<3> tempMat_2;
+    BLA::Matrix<3>   tempMat;
+    BLA::Matrix<3>   tempMat_1;
+    BLA::Matrix<3>   tempMat_2;
     BLA::Matrix<3,3> tempMat_3;
     BLA::Matrix<3,3> tempMat_4;
-    BLA::Matrix<1> u_k = {0};
-    BLA::Matrix<3> B_k;
+    BLA::Matrix<1>   u_k = {0};
+    BLA::Matrix<3>   B_k;
     BLA::Matrix<3,3> A_k = {1, 0, 0,
                             0, 1, 0,
                             0, 0, 0};
 
-    delta_t = ((timeNow = millis()) - timeLast) / 1000;
+    float delta_t = ((timeNow = millis()) - timeLast) / 1000;
     timeLast = timeNow;
     //Serial.println(delta_t);
-    z_k(0) = alt;
-    z_k(1) = vel;
-    z_k(2) = accel;
+    z_k(0) = rawState.alt;
+    z_k(1) = rawState.vel;
+    z_k(2) = rawState.accel;
 
     B_k(0) = (sq(delta_t)) / 2;
     //  b_k[0] = b_k[0] / 2;
@@ -402,14 +439,17 @@ void kalmanFilter() {
     Serial << "p_k: " << p_k << '\n';
 #endif
 
-    alt = x_k(0);
-    vel = x_k(1);
-    accel = x_k(2);
+    filteredState->alt = x_k(0);
+    filteredState->vel = x_k(1);
+    filteredState->accel = x_k(2);
+    filteredState->delta_t = delta_t;
+    
 #if DEBUG
     Serial.println(alt);
     Serial.println(vel);
     Serial.println(accel);
 #endif
+
     timeNow = millis();
 }
 
