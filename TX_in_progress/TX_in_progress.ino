@@ -74,24 +74,17 @@ float timeNow,timeLast,timeLog;                   // Time values
 char fileName[20];                                // .csv file, dynamically named "telemetryData_#"
 const uint8_t packetSize = 60;                    // Use this value to change the radio packet size
 char radioPacket[packetSize];                     // char array used for radio packet transmission
-float vbat;                                       // Voltage reading of connected battery
-float gpsLat, gpsLon;                             // GPS Latitude and Longitude
-bool separation;                                  // Will return TRUE if vehicle separation has occurred
 String dataString;                                // String used for radio packet transmission
 float alt0;                                       // BMP280 altitude reading
-int temperature;                                  // BMP280 temperature reading
 uint8_t buf[RH_RF95_MAX_MESSAGE_LEN];             // Used for packet retrieval 
 uint8_t len = sizeof(buf);                        // Used for packet retrieval
 sensors_event_t event;                            // Event capture for LIS3DH accelerometer readings
 float SeaLvlPressure = 1019.5;                    // NOTE: Update with current sea level pressure
                                                   // Go to: https://forecast.weather.gov for Barometer readings
-//float alt, vel, accel, delta_t
 
 struct stateStruct  {
   float alt, vel, accel, delta_t;
 };
-//std::ostringstream ss;
-
 
 
 
@@ -243,30 +236,28 @@ void setup()  {
 
 void loop() {
     struct stateStruct rawState, filteredState;
-    if (separation == 0)  {
-        delay(100);
-    }
-    else {
+    if (separation == 1)  {
         delay(5000);
         if (GPS.newNMEAreceived()) {
             if (!GPS.parse(GPS.lastNMEA()))
                 return;
         }
-        gpsLat = GPS.lat;
-        gpsLon = GPS.lon;
+        float gpsLat = GPS.lat;
+        float gpsLon = GPS.lon;
     }
+    else {
 
     // Open SD File
     dataFile = SD.open(fileName,FILE_WRITE);
 
     // Read Battery Voltage
-    vbat = ((analogRead(VBATPIN))*3.3)/512;  // Convert to voltage  
+    float vbat = ((analogRead(VBATPIN))*3.3)/512;  // Convert to voltage  
 
     // Read Separation
-    separation = digitalRead(SEPARATE);
+    bool separation = digitalRead(SEPARATE);
 
     // Read Temperature
-    temperature = bmp.readTemperature();
+    int temperature = bmp.readTemperature();
 
     // Read Altitude
     rawState.alt = bmp.readAltitude(SeaLvlPressure) - alt0;
@@ -330,6 +321,7 @@ void loop() {
 
     // Close SD File
     dataFile.close();
+    }
 }
 
 
