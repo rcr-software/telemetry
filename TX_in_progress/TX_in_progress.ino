@@ -70,7 +70,7 @@ BLA::Matrix<3,3> R_k = {0.5, 0, 0,
 #define VBATPIN A7                                // Analog reading of battery voltage
 #define LED 13                                    // LED on Adalogger
 #define SEPARATE 11                               // Separate Pin - Pull Down Resistor
-float timeNow,timeLast,timeLog;                   // Time values
+float timeNow,timeLast,timeLog,delta_t;           // Time values
 char fileName[20];                                // .csv file, dynamically named "telemetryData_#"
 const uint8_t packetSize = 60;                    // Use this value to change the radio packet size
 char radioPacket[packetSize];                     // char array used for radio packet transmission
@@ -85,7 +85,7 @@ float SeaLvlPressure = 1019.5;                    // NOTE: Update with current s
                                                   // Go to: https://forecast.weather.gov for Barometer readings
 
 struct stateStruct  {
-  float alt, vel, accel, delta_t;
+  float alt, vel, accel;
 };
 
 
@@ -102,12 +102,9 @@ void setup()  {
     digitalWrite(LED,LOW);
 
     Serial.begin(115200);
-
     GPS.begin(9600);
     GPS.sendCommand(PMTK_SET_NMEA_OUTPUT_RMCGGA);
     GPS.sendCommand(PMTK_SET_NMEA_UPDATE_1HZ);
-    //GPS.sendCommand(PGCMD_ANTENNA);
-    //GPSSerial.println(PMTK_Q_RELEASE);
 
     //      while(!Serial)  {
     //        delay(100);
@@ -140,24 +137,21 @@ void setup()  {
 
     for(int i=0;;i++)
     {
-        String temp = "data_" + String(i) + ".csv";
-        temp.toCharArray(fileName, sizeof(fileName));
-        if(!SD.exists(fileName))
-        {
-            dataString = "File: " + temp;
-            sendMsg(dataString);
-            delay(1000);
+      String temp = "data_" + String(i) + ".csv";
+      temp.toCharArray(fileName, sizeof(fileName));
+      if (!SD.exists(fileName))  {
+        dataString = "File: " + temp;
+        sendMsg(dataString);
+        delay(1000);
 
-            dataFile = SD.open(fileName,FILE_WRITE);
-            dataFile.println("Time,Alt,Vel,Accel,Lat,Lon,Temp,Vbat,Sep");
-            dataFile.close();
-            break;
-        }
+        dataFile = SD.open(fileName,FILE_WRITE);
+        dataFile.println("Time,Alt,Vel,Accel,Lat,Lon,Temp,Vbat,Sep");
+        dataFile.close();
+        break;
+      }
     }
 
     //Check BNO055 ------------------------------------------
-    // NOTE: The BNO055 .cpp & .h files have been altered - operation mode is in accelerometer only!
-    // This was done to increase the range of the accelerometer to 16G
     if (!bno.begin()) {
         sendMsg("BNO055 Init Failed");
         while(1);
@@ -179,6 +173,16 @@ void setup()  {
     sendMsg("BNO055 Init OK");
     delay(1000);
 
+    //Check LIS3DH ------------------------------------------
+    if (!lis.begin()) {
+      Serial.println("LIS3DH Init Failed");
+      while(1);
+    }
+    
+    lis.setRange(LIS3DH_RANGE_16_G);
+    sendMsg("LIS3DH Init OK");
+    delay(1000);
+
     //Check BMP280 ------------------------------------------
     if (!bmp.begin()) {   
       sendMsg("BMP280 Init Failed");
@@ -189,15 +193,10 @@ void setup()  {
     delay(1000);
           
     //Wait for GPS Fix --------------------------------------
-//    bool temp = false;
-//    while (!temp) {
-//        sendMsg("No Fix Yet");
+//    while (!GPS.fix()) {
+//        sendMsg("No GPS Fix");
 //        if (GPS.newNMEAreceived()) {
 //            if (GPS.parse(GPS.lastNMEA()))
-//                if (GPS.fix)  {
-//                    sendMsg(String(GPS.fix));
-//                    temp = true;
-//                }
 //        }
 //        delay(1000);
 //    }
@@ -228,7 +227,6 @@ void setup()  {
 
     //Initialize rocket variables ----------------------------------
     timeLast = millis();
-    timeLast /= 1000;
     alt0 = bmp.readAltitude(SeaLvlPressure);
 
 }   // END SETUP
@@ -247,9 +245,6 @@ void loop() {
     struct stateStruct rawState, filteredState;
 
     if (!separation) {
-      // Read Time
-      timeNow = millis();
-      timeNow /= 1000;
       
       // Read Altitude
       rawState.alt = bmp.readAltitude(SeaLvlPressure) - alt0;
@@ -265,23 +260,17 @@ void loop() {
       xL = (float)event.acceleration.x;
       yL = (float)event.acceleration.y; 
       zL = (float)event.acceleration.z;
-      float temp = sq(xL - xG) + sq(yL - yG) + sq(zL - zG);
-      if (temp < 0) {
-          rawState.accel = -sqrt(temp);
-      }
-      else  {
-          rawState.accel = sqrt(temp);
-      }
+      rawState.accel = (xL - xG) + (yL - yG) + (zL - zG);
   
       // Calculate Velocity from Acceleration Reading
-      rawState.vel = (rawState.accel*rawState.delta_t) + velPrev;
+      rawState.vel = (rawState.accel*delta_t) + velPrev;
   
       #if DEBUG
-        Serial << "Alt: " << alt << '\n';
+        Serial << "Alt: " << rawState.alt << '\n';
         Serial << "xG: " << xG << " yG: " << yG << " zG: " << zG << '\n';
         Serial << "xL: " << xL << " yL: " << yL << " zL: " << zL << '\n';
-        Serial << "Accel: " << accel << '\n';
-        Serial << "Vel: " << vel << '\n';
+        Serial << "Accel: " << rawState.accel << '\n';
+        Serial << "Vel: " << rawState.vel << '\n';
       #endif
   
       // KALMAN FILTER:
@@ -289,7 +278,7 @@ void loop() {
   
       // Update previous time and velocity
       velPrev = filteredState.vel;
-      timeLog += filteredState.delta_t;
+      float timeLog += delta_t;
         
 //    else  {
 //        delay(5000);
@@ -302,6 +291,7 @@ void loop() {
       
         // Append Data
         if (timeLog > 0.5) {
+          
           // Open SD File
           dataFile = SD.open(fileName,FILE_WRITE);
       
@@ -314,7 +304,7 @@ void loop() {
           // Read Temperature
           int temperature = bmp.readTemperature();
     
-          dataString  = String(timeNow) + ",";
+          dataString  = String(timeNow/1000) + ",";
           dataString += String(filteredState.alt) + ",";
           dataString += String(filteredState.vel) + ",";
           dataString += String(filteredState.accel) + ",";
@@ -375,7 +365,7 @@ void kalmanFilter(struct stateStruct rawState, struct stateStruct* filteredState
                             0, 1, 0,
                             0, 0, 0};
 
-    float delta_t = ((timeNow = millis()) - timeLast) / 1000;
+    delta_t = (float)((timeNow = millis()) - timeLast) / 1000;
     timeLast = timeNow;
     //Serial.println(delta_t);
     z_k(0) = rawState.alt;
@@ -443,12 +433,11 @@ void kalmanFilter(struct stateStruct rawState, struct stateStruct* filteredState
     filteredState->alt = x_k(0);
     filteredState->vel = x_k(1);
     filteredState->accel = x_k(2);
-    filteredState->delta_t = delta_t;
     
 #if DEBUG
-    Serial.println(alt);
-    Serial.println(vel);
-    Serial.println(accel);
+    Serial.println(filteredState->alt);
+    Serial.println(filteredState->vel);
+    Serial.println(filteredState->accel);
 #endif
 
     timeNow = millis();
