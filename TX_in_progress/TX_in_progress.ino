@@ -76,6 +76,7 @@ const uint8_t packetSize = 60;                    // Use this value to change th
 char radioPacket[packetSize];                     // char array used for radio packet transmission
 String dataString;                                // String used for radio packet transmission
 float alt0;                                       // BMP280 altitude reading
+float velPrev;                                    // Previous Velocity Placeholder
 float gpsLat,gpsLon;                              // GPS Latitude and Longitude
 bool separation = 0;                              // Vehicle separation detection boolean
 uint8_t buf[RH_RF95_MAX_MESSAGE_LEN];             // Used for packet retrieval 
@@ -250,18 +251,24 @@ void loop() {
       rawState.alt = bmp.readAltitude(SeaLvlPressure) - alt0;
   
       // Get Acceleration Vector Values
-      float xL,yL,zL,xG,yG,zG,velPrev = 0;                  // Acceleration Values (p == previous value)
       imu::Vector<3> gravity = bno.getVector(Adafruit_BNO055::VECTOR_GRAVITY);
       lis.getEvent(&event);
   
-      xG = (float)gravity.x();
-      yG = (float)gravity.y();
-      zG = (float)gravity.z();
-      xL = (float)event.acceleration.x;
-      yL = (float)event.acceleration.y; 
-      zL = (float)event.acceleration.z;
-      rawState.accel = (xL - xG) + (yL - yG) + (zL - zG);
-  
+      float xG = (float)gravity.x();
+      float yG = (float)gravity.y();
+      float zG = (float)gravity.z();
+      float xL = (float)event.acceleration.x;
+      float yL = (float)event.acceleration.y; 
+      float zL = (float)event.acceleration.z;
+      float Ax = (xL - xG);
+      float Ay = (yL - yG);
+      float Az = (zL - zG);
+
+      if ((Ax + Ay + Az) < 0)
+        rawState.accel = -sqrt(sq(Ax) + sq(Ay) + sq(Az));
+      else
+        rawState.accel = sqrt(sq(Ax) + sq(Ay) + sq(Az));
+        
       // Calculate Velocity from Acceleration Reading
       rawState.vel = (rawState.accel*delta_t) + velPrev;
   
@@ -278,7 +285,7 @@ void loop() {
   
       // Update previous time and velocity
       velPrev = filteredState.vel;
-      float timeLog += delta_t;
+
         
 //    else  {
 //        delay(5000);
@@ -289,40 +296,41 @@ void loop() {
 //        }
 //    }
       
-        // Append Data
-        if (timeLog > 0.5) {
-          
-          // Open SD File
-          dataFile = SD.open(fileName,FILE_WRITE);
-      
-          // Read Battery Voltage
-          float vbat = ((analogRead(VBATPIN))*3.3)/512;  // Convert to voltage  
-      
-          // Read Separation
-//          separation = digitalRead(SEPARATE);
-      
-          // Read Temperature
-          int temperature = bmp.readTemperature();
+      // Append Data
+      timeLog += delta_t;
+      if (timeLog > 0.5) {
     
-          dataString  = String(timeNow/1000) + ",";
-          dataString += String(filteredState.alt) + ",";
-          dataString += String(filteredState.vel) + ",";
-          dataString += String(filteredState.accel) + ",";
+        // Read Battery Voltage
+        float vbat = ((analogRead(VBATPIN))*3.3)/512;  // Convert to voltage  
+    
+        // Read Separation
+//          separation = digitalRead(SEPARATE);
+    
+        // Read Temperature
+        int temperature = bmp.readTemperature();
+
+        // Open SD File
+        dataFile = SD.open(fileName,FILE_WRITE);
+        
+        dataString  = String(timeNow/1000) + ",";
+        dataString += String(filteredState.alt) + ",";
+        dataString += String(filteredState.vel) + ",";
+        dataString += String(filteredState.accel) + ",";
 //          dataString += String(gpsLat) + ",";
 //          dataString += String(gpsLon) + ",";
-          dataString += String(temperature) + ",";
-          dataString += String(vbat) + ",";
-          dataString += String(separation);
-          timeLog = 0;
-    
-          // Save Data to SD File and Radio Transmit
-          dataFile.println(dataString);
-          sendMsg(dataString);
-          
-          // Close SD File
-          dataFile.close();
-        }
-    }
+        dataString += String(temperature) + ",";
+        dataString += String(vbat) + ",";
+        dataString += String(separation);
+        timeLog = 0;
+  
+        // Save Data to SD File and Radio Transmit
+        dataFile.println(dataString);
+        sendMsg(dataString);
+        
+        // Close SD File
+        dataFile.close();
+      }
+   }
 }
 
 
@@ -359,7 +367,7 @@ void kalmanFilter(struct stateStruct rawState, struct stateStruct* filteredState
     BLA::Matrix<3>   tempMat_2;
     BLA::Matrix<3,3> tempMat_3;
     BLA::Matrix<3,3> tempMat_4;
-    BLA::Matrix<1>   u_k = {0};
+    BLA::Matrix<1>   u_k = {rawState.accel};
     BLA::Matrix<3>   B_k;
     BLA::Matrix<3,3> A_k = {1, 0, 0,
                             0, 1, 0,
@@ -367,10 +375,18 @@ void kalmanFilter(struct stateStruct rawState, struct stateStruct* filteredState
 
     delta_t = (float)((timeNow = millis()) - timeLast) / 1000;
     timeLast = timeNow;
-    //Serial.println(delta_t);
+#if DEBUG
+    Serial << "delta_t: " << delta_t << '\n';
+#endif
+
     z_k(0) = rawState.alt;
     z_k(1) = rawState.vel;
     z_k(2) = rawState.accel;
+#if DEBUG
+    Serial << "z_k.alt: " << z_k(0) << '\n';
+    Serial << "z_k.vel: " << z_k(1) << '\n';
+    Serial << "z_k.accel: " << z_k(2) << '\n';
+#endif
 
     B_k(0) = (sq(delta_t)) / 2;
     //  b_k[0] = b_k[0] / 2;
@@ -378,6 +394,12 @@ void kalmanFilter(struct stateStruct rawState, struct stateStruct* filteredState
     B_k(2) = 1;
 
     A_k(0,1) = delta_t;
+#if DEBUG
+    Serial << "B_k(0): " << B_k(0) << '\n';
+    Serial << "B_k(1): " << B_k(1) << '\n';
+    Serial << "B_k(2): " << B_k(2) << '\n';
+    Serial << "A_k(0,1): " << A_k(0,1) << '\n';
+#endif
 
     //PREDICT:
     //x_k = A_k*x_k' + B_k*u_k
@@ -433,7 +455,6 @@ void kalmanFilter(struct stateStruct rawState, struct stateStruct* filteredState
     filteredState->alt = x_k(0);
     filteredState->vel = x_k(1);
     filteredState->accel = x_k(2);
-    
 #if DEBUG
     Serial.println(filteredState->alt);
     Serial.println(filteredState->vel);
