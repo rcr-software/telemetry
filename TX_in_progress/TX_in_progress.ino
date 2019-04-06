@@ -7,8 +7,6 @@
 // __________________________________________________________________
 // *** HEADER FILES ***
 
-//#include <stdio.h>
-//#include <string.h>
 #include <SPI.h>
 #include <SD.h>
 #include <Wire.h>
@@ -19,7 +17,6 @@
 #include <Adafruit_LIS3DH.h>
 #include <Adafruit_GPS.h>
 #include <utility/imumaths.h>
-#include <BasicLinearAlgebra.h>
 // __________________________________________________________________
 // *** FEATHER INITIALIZATION ***
 
@@ -38,7 +35,7 @@ RH_RF95 rf95(RFM95_CS, RFM95_INT);
 #define cardSelect    4 
 File dataFile;
 // __________________________________________________________________
-// *** BNO055 & BMP280 INITIALIZATION ***
+// *** BNO055, BMP280, & LIS3DH INITIALIZATION ***
 
 //NOTE: ADR needs to be tied to 3V
 Adafruit_BNO055 bno;
@@ -52,41 +49,30 @@ Adafruit_GPS GPS(&GPSSerial);
 #define GPSECHO false
 
 // __________________________________________________________________
-// *** KALMAN VARIABLES ***
-
-using namespace BLA;
-
-BLA::Matrix<3,3> Q_k = {1,   0,   0,
-                        0, 0.2,   0,
-                        0,   0, 0.2};
-
-BLA::Matrix<3,3> R_k = {0.5, 0, 0,
-                          0, 4, 0,
-                          0, 0, 7};
-
-// __________________________________________________________________
 // *** VALUES ***
-#define DEBUG false                               // Used for debugging purposes
-#define VBATPIN A7                                // Analog reading of battery voltage
-#define LED 13                                    // LED on Adalogger
-#define SEPARATE 11                               // Separate Pin - Pull Down Resistor
-float timeNow,timeLast,timeLog,delta_t;           // Time values
-char fileName[20];                                // .csv file, dynamically named "telemetryData_#"
-const uint8_t packetSize = 60;                    // Use this value to change the radio packet size
-char radioPacket[packetSize];                     // char array used for radio packet transmission
-String dataString;                                // String used for radio packet transmission
-float alt0;                                       // BMP280 altitude reading
-float velPrev;                                    // Previous Velocity Placeholder
-float gpsLat,gpsLon;                              // GPS Latitude and Longitude
-bool separation = 0;                              // Vehicle separation detection boolean
-uint8_t buf[RH_RF95_MAX_MESSAGE_LEN];             // Used for packet retrieval 
-uint8_t len = sizeof(buf);                        // Used for packet retrieval
-sensors_event_t event;                            // Event capture for LIS3DH accelerometer readings
-float SeaLvlPressure = 1019.5;                    // NOTE: Update with current sea level pressure
-                                                  // Go to: https://forecast.weather.gov for Barometer readings
+#define DEBUG false                                             // Used for debugging purposes
+#define VBATPIN A7                                              // Analog reading of battery voltage
+#define LED 13                                                  // LED on M0 Feather
+#define SEPARATE 11                                             // Separate Pin - Pull Down Resistor
+unsigned long timeNow,timeLast,dataLog,radioTransmit,delta_t;   // Time values
+char fileName[20];                                              // .csv file, dynamically named "telemetryData_#"
+const uint8_t packetSize = 100;                                 // Use this value to change the radio packet size
+char radioPacket[packetSize];                                   // char array used for radio packet transmission
+String dataString;                                              // String used for radio packet transmission
+float rawVel,rawVelPrev,filteredVel,filteredVelPrev;            // Vehicle State Values
+float altVel,altVelPrev,alt0,alt,delta_alt,altPrev;
+sensors_event_t event;                                          // LIS3DH Sensor Values
+float gpsLat,gpsLon;                                            // GPS Latitude and Longitude
+bool separation;                                                // Vehicle separation detection boolean
+uint8_t buf[RH_RF95_MAX_MESSAGE_LEN];                           // Used for packet retrieval 
+uint8_t len = sizeof(buf);                                      // Used for packet retrieval
+float avgMotorThrust = 2585.5;                                  // Newtons
+float avgMotorMass = 8.974;                                     // Kilograms
+float SeaLvlPressure = 1019.5;                                  // NOTE: Update with current sea level pressure (hPa)
+                                                                // Go to: https://forecast.weather.gov for Barometer readings
 
 struct stateStruct  {
-  float alt, vel, accel;
+  float accel;
 };
 
 
@@ -111,7 +97,7 @@ void setup()  {
     //        delay(100);
     //      }
 
-    //    Check RF95 and Frequency -------------------------------
+    // Check RF95 and Frequency -------------------------------
     while(!rf95.init() || !rf95.setFrequency(RF95_FREQ)) {
         digitalWrite(LED,HIGH);
         delay(1000);
@@ -130,7 +116,7 @@ void setup()  {
     sendMsg("TX OK: 862MHz");
     delay(1000);
 
-    //Check SD ----------------------------------------------
+    // Check SD ----------------------------------------------
     while(!SD.begin(cardSelect)) {
         sendMsg("No SD Card Detected");
         delay(5000);
@@ -152,7 +138,7 @@ void setup()  {
       }
     }
 
-    //Check BNO055 ------------------------------------------
+    // Check BNO055 ------------------------------------------
     if (!bno.begin()) {
         sendMsg("BNO055 Init Failed");
         while(1);
@@ -174,7 +160,7 @@ void setup()  {
     sendMsg("BNO055 Init OK");
     delay(1000);
 
-    //Check LIS3DH ------------------------------------------
+    // Check LIS3DH ------------------------------------------
     if (!lis.begin()) {
       Serial.println("LIS3DH Init Failed");
       while(1);
@@ -184,7 +170,7 @@ void setup()  {
     sendMsg("LIS3DH Init OK");
     delay(1000);
 
-    //Check BMP280 ------------------------------------------
+    // Check BMP280 ------------------------------------------
     if (!bmp.begin()) {   
       sendMsg("BMP280 Init Failed");
       while(1);
@@ -193,7 +179,7 @@ void setup()  {
     sendMsg("BMP280 Init OK");
     delay(1000);
           
-    //Wait for GPS Fix --------------------------------------
+    // Wait for GPS Fix --------------------------------------
 //    while (!GPS.fix()) {
 //        sendMsg("No GPS Fix");
 //        if (GPS.newNMEAreceived()) {
@@ -205,7 +191,7 @@ void setup()  {
     sendMsg("GPS init OK");
     delay(1000);
     
-    //Check Separation Hardware -----------------------------
+    // Check Separation Hardware -----------------------------
     //      separation = digitalRead(SEPARATE);
     //      
     //      while (separation)  {
@@ -217,7 +203,7 @@ void setup()  {
 
     sendMsg("Separation init OK");
 
-    //      //Wait for Startup Signal -------------------------------
+    // Wait for Startup Signal -------------------------------
     //      while (dataString != "GO FOR LAUNCH") {
     //       if (rf95.available())   {
     //          if (rf95.recv(buf, &len))   {
@@ -226,7 +212,7 @@ void setup()  {
     //        }
     //      }
 
-    //Initialize rocket variables ----------------------------------
+    // Initialize variables ----------------------------------
     timeLast = millis();
     alt0 = bmp.readAltitude(SeaLvlPressure);
 
@@ -247,58 +233,68 @@ void loop() {
 
     if (!separation) {
       
+      // TIMESTAMP:
+      delta_t = (timeNow = millis()) - timeLast;
+      timeLast = timeNow;    
+      
       // Read Altitude
-      rawState.alt = bmp.readAltitude(SeaLvlPressure) - alt0;
-  
+      alt = bmp.readAltitude(SeaLvlPressure) - alt0;
+      delta_alt = alt - altPrev;
+      altPrev = alt;
+      
       // Get Acceleration Vector Values
       imu::Vector<3> gravity = bno.getVector(Adafruit_BNO055::VECTOR_GRAVITY);
       lis.getEvent(&event);
   
-      float xG = (float)gravity.x();
-      float yG = (float)gravity.y();
-      float zG = (float)gravity.z();
-      float xL = (float)event.acceleration.x;
-      float yL = (float)event.acceleration.y; 
-      float zL = (float)event.acceleration.z;
-      float Ax = (xL - xG);
-      float Ay = (yL - yG);
-      float Az = (zL - zG);
+      float gx = (float)gravity.x();
+      float gy = (float)gravity.y();
+      float gz = (float)gravity.z();
+      float lx = (float)event.acceleration.x;
+      float ly = (float)event.acceleration.y; 
+      float lz = (float)event.acceleration.z;
 
-      if ((Ax + Ay + Az) < 0)
-        rawState.accel = -sqrt(sq(Ax) + sq(Ay) + sq(Az));
-      else
-        rawState.accel = sqrt(sq(Ax) + sq(Ay) + sq(Az));
-        
-      // Calculate Velocity from Acceleration Reading
-      rawState.vel = (rawState.accel*delta_t) + velPrev;
-  
-      #if DEBUG
-        Serial << "Alt: " << rawState.alt << '\n';
-        Serial << "xG: " << xG << " yG: " << yG << " zG: " << zG << '\n';
-        Serial << "xL: " << xL << " yL: " << yL << " zL: " << zL << '\n';
-        Serial << "Accel: " << rawState.accel << '\n';
-        Serial << "Vel: " << rawState.vel << '\n';
-      #endif
+      float accelx = lx - gx;
+      float accely = ly - gy;
+      rawState.accel = lz - gz;
   
       // KALMAN FILTER:
       kalmanFilter(rawState, &filteredState);
   
-      // Update previous time and velocity
-      velPrev = filteredState.vel;
-
-        
-//    else  {
-//        delay(5000);
-//        if (GPS.newNMEAreceived()) {
-//            if (GPS.parse(GPS.lastNMEA()))
-//               gpsLat = GPS.lat;
-//               gpsLon = GPS.lon;
-//        }
-//    }
+      // VELOCITY CALCULATIONS:
+      // from raw acceleration and altitude
+      float temp = sq(rawVelPrev) - 2*rawState.accel*delta_alt;
+      if (temp < 0) {
+        rawVel = -sqrt(abs(temp));
+      }
+      else  {
+        rawVel = sqrt(temp);    
+      }
+      rawVelPrev = rawVel;
+    
+      // from filtered acceleration and altitude
+      temp = sq(filteredVelPrev) - 2*filteredState.accel*delta_alt;
+      if (temp < 0) {
+        filteredVel = -sqrt(abs(temp));
+      }
+      else  {
+        filteredVel = sqrt(temp);    
+      }
+      filteredVelPrev = filteredVel;
+    
+      // from altitude and time
+      altVel = ((2*delta_alt)/delta_t) - altVelPrev;
+      altVelPrev = altVel;
+      
+      #if DEBUG
+        Serial << "accelx: " << accelx << '\n';
+        Serial << "accely: " << accely << '\n';
+        Serial << "raw accelz: " << rawState.accel << '\n'; 
+        Serial << "filtered accelz: " << filteredState.accel << '\n'; 
+      #endif
       
       // Append Data
-      timeLog += delta_t;
-      if (timeLog > 0.5) {
+      dataLog += delta_t;
+      if (dataLog > 100) {
     
         // Read Battery Voltage
         float vbat = ((analogRead(VBATPIN))*3.3)/512;  // Convert to voltage  
@@ -309,30 +305,46 @@ void loop() {
         // Read Temperature
         int temperature = bmp.readTemperature();
 
+        // Read GPS coordinates
+//      if (GPS.newNMEAreceived()) {
+//        if (GPS.parse(GPS.lastNMEA()))  {
+//          gpsLat = GPS.lat;
+//          gpsLon = GPS.lon;
+//        }
+//      }
+
         // Open SD File
         dataFile = SD.open(fileName,FILE_WRITE);
         
-        dataString  = String(timeNow/1000) + ",";
-        dataString += String(filteredState.alt) + ",";
-        dataString += String(filteredState.vel) + ",";
+        dataString  = String(float(timeNow/1000)) + ",";
+        dataString += String(alt) + ",";
+        dataString += String(rawVel) + ",";
+        dataString += String(filteredVel) + ",";
+        dataString += String(altVel) + ",";
+        dataString += String(accelx) + ",";
+        dataString += String(accely) + ",";
+        dataString += String(rawState.accel) + ",";
         dataString += String(filteredState.accel) + ",";
 //          dataString += String(gpsLat) + ",";
 //          dataString += String(gpsLon) + ",";
         dataString += String(temperature) + ",";
         dataString += String(vbat) + ",";
         dataString += String(separation);
-        timeLog = 0;
-  
-        // Save Data to SD File and Radio Transmit
+        radioTransmit += dataLog;
+        dataLog = 0;
+
+        // Save data to SD file every 0.1 sec and radio transmit every 0.5 sec
         dataFile.println(dataString);
-        sendMsg(dataString);
-        
+        if (radioTransmit > 500) {
+          sendMsg(dataString);
+          radioTransmit = 0;
+        }
+
         // Close SD File
         dataFile.close();
       }
    }
 }
-
 
 
 
@@ -356,111 +368,45 @@ void sendMsg(String dataString) {
 // __________________________________________________________________
 // *** KALMAN FILTER FUNCTION ***
 void kalmanFilter(struct stateStruct rawState, struct stateStruct* filteredState) {
-    static BLA::Matrix<3,3> p_k = {0, 0, 0,
-                                   0, 0, 0,
-                                   0, 0, 0};
-    static BLA::Matrix<3> x_k = {0,0,0};
-    BLA::Matrix<3>   z_k;
-    BLA::Matrix<3,3> k_gain;
-    BLA::Matrix<3>   tempMat;
-    BLA::Matrix<3>   tempMat_1;
-    BLA::Matrix<3>   tempMat_2;
-    BLA::Matrix<3,3> tempMat_3;
-    BLA::Matrix<3,3> tempMat_4;
-    BLA::Matrix<1>   u_k = {rawState.accel};
-    BLA::Matrix<3>   B_k;
-    BLA::Matrix<3,3> A_k = {1, 0, 0,
-                            0, 1, 0,
-                            0, 0, 0};
+    static float p_k = 0;                
+    static float x_k = 0;
+    float z_k = rawState.accel;
+    float k_gain;
+    float u_k = -9.81;
+    
+    // If R -> 0 : K -> 1 (primarily adjusts with measurement updates)
+    // If R -> large : K -> 0 (primarily adjusts with predicted updates)
+    // If P -> 0 : measurement updates are mostly ignored
+    // Q is used to ensure P isn't too small or goes to zero.
+    static float q_k = 0.2;
+    static float r_k = 7;
 
-    delta_t = (float)((timeNow = millis()) - timeLast) / 1000;
-    timeLast = timeNow;
-#if DEBUG
-    Serial << "delta_t: " << delta_t << '\n';
-#endif
-
-    z_k(0) = rawState.alt;
-    z_k(1) = rawState.vel;
-    z_k(2) = rawState.accel;
-#if DEBUG
-    Serial << "z_k.alt: " << z_k(0) << '\n';
-    Serial << "z_k.vel: " << z_k(1) << '\n';
-    Serial << "z_k.accel: " << z_k(2) << '\n';
-#endif
-
-    B_k(0) = (sq(delta_t)) / 2;
-    //  b_k[0] = b_k[0] / 2;
-    B_k(1) = delta_t;
-    B_k(2) = 1;
-
-    A_k(0,1) = delta_t;
-#if DEBUG
-    Serial << "B_k(0): " << B_k(0) << '\n';
-    Serial << "B_k(1): " << B_k(1) << '\n';
-    Serial << "B_k(2): " << B_k(2) << '\n';
-    Serial << "A_k(0,1): " << A_k(0,1) << '\n';
-#endif
-
+    // Estimate the acceleration for the kalman filter
+    if (z_k > 10)  {
+      u_k += avgMotorThrust / avgMotorMass;
+    }
+    else if (alt < 20) {
+      u_k = 0;
+    }
+    
     //PREDICT:
-    //x_k = A_k*x_k' + B_k*u_k
-    Multiply(B_k,u_k,tempMat);
-    Multiply(A_k,x_k,tempMat_1);
-    Add(tempMat,tempMat_1,x_k);
-#if DEBUG
-    Serial << "tempMat: " << tempMat << '\n';
-    Serial << "tempMat_1: " << tempMat_1 << '\n';
-    Serial << "x_k: " << x_k << '\n';
-#endif
-
-    //p_k = Q_k + A_k*p_k'*T(A_k)
-    Multiply(A_k,p_k,tempMat_3);
-    BLA::Matrix<3,3> A_k_T = ~A_k;
-    Multiply(tempMat_3,A_k_T,tempMat_4);
-    Add(Q_k,tempMat_4,p_k);
-#if DEBUG
-    Serial << "tempMat_3: " << tempMat_3 << '\n';
-    Serial << "tempMat_4: " << tempMat_4 << '\n';
-    Serial << "p_k: " << p_k << '\n';
-#endif
+    p_k = q_k + p_k;
 
     //KALMAN GAIN:
-    //p_k*T(H_k) / (R_k + H_k * p_k * T(H_k)) == p_k / (R_k + p_k)    When h_k = eye(3)
-    Add(R_k,p_k,tempMat_3);
-    Invert(tempMat_3);
-    Multiply(p_k,tempMat_3,k_gain);
-#if DEBUG
-    Serial << "tempMat_3: " << tempMat_3 << '\n';
-    Serial << "k_gain: " << k_gain << '\n';
-#endif
+    k_gain = p_k / (r_k + p_k);
 
     //UPDATE:
-    //x_k = x_k(-) + (k_gain * (z_k - x_k(-)))
-    Subtract(z_k,x_k,tempMat_1);
-    Multiply(k_gain,tempMat_1,tempMat_2);
-    x_k += tempMat_2;
-#if DEBUG
-    Serial << "tempMat_1: " << tempMat_1 << '\n';
-    Serial << "tempMat_2: " << tempMat_2 << '\n';
-    Serial << "x_k: " << x_k << '\n';
-#endif
+    x_k = x_k + (k_gain * (z_k - x_k));
+    p_k = p_k * (1 - k_gain);
 
-    //p_k = p_k - (k_gain * p_k) IS THIS RIGHT???
-    Multiply(k_gain,p_k,tempMat_3);
-    p_k -= tempMat_3;
-#if DEBUG
-    Serial << "tempMat_3: " << tempMat_3 << '\n';
-    Serial << "p_k: " << p_k << '\n';
-#endif
-
-    filteredState->alt = x_k(0);
-    filteredState->vel = x_k(1);
-    filteredState->accel = x_k(2);
-#if DEBUG
-    Serial.println(filteredState->alt);
-    Serial.println(filteredState->vel);
-    Serial.println(filteredState->accel);
-#endif
-
-    timeNow = millis();
+    filteredState->accel = x_k;
+    
+    #if DEBUG
+      Serial << "delta_t: " << delta_t << '\n';
+      Serial << "u_k: " << u_k << '\n';
+      Serial << "k_gain: " << k_gain << '\n';
+      Serial << "x_k: " << x_k << '\n';
+      Serial << "p_k: " << p_k << '\n';
+      Serial.println(filteredState->accel);
+    #endif
 }
-
