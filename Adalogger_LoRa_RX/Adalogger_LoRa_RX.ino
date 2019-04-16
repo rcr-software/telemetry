@@ -11,14 +11,14 @@
 //    #include "BluefruitConfig.h"
     
     //for feather m0  
-    #define RFM95_CS 8
-    #define RFM95_RST 4
-    #define RFM95_INT 3
+//    #define RFM95_CS 8
+//    #define RFM95_RST 4
+//    #define RFM95_INT 3
 
     //for radio featherWing
-    //#define RFM95_RST     11   // "A"
-    //#define RFM95_CS      10   // "B"
-    //#define RFM95_INT     6    // "D"
+    #define RFM95_RST     11   // "A"
+    #define RFM95_CS      10   // "B"
+    #define RFM95_INT     6    // "D"
 
     // Utilizing Frequency of 862 MHz for data collection
     #define RF95_FREQ 862.0
@@ -50,11 +50,11 @@
         delay(100);
       }
      
-//      // manual reset
-//      digitalWrite(RFM95_RST, LOW);
-//      delay(10);
-//      digitalWrite(RFM95_RST, HIGH);
-//      delay(10);
+      // manual reset
+      digitalWrite(RFM95_RST, LOW);
+      delay(100);
+      digitalWrite(RFM95_RST, HIGH);
+      delay(100);
      
       if (!rf95.init()) {
         Serial.println("RX init failed");

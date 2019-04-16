@@ -17,6 +17,8 @@
 #include <Adafruit_LIS3DH.h>
 #include <Adafruit_GPS.h>
 #include <utility/imumaths.h>
+#include <stdio.h>
+
 // __________________________________________________________________
 // *** FEATHER INITIALIZATION ***
 
@@ -29,11 +31,13 @@
 
 // Singleton instance of the radio driver
 RH_RF95 rf95(RFM95_CS, RFM95_INT);
+
 // __________________________________________________________________
 // *** SD INITIALIZATION ***
 
 #define cardSelect    4 
 File dataFile;
+
 // __________________________________________________________________
 // *** BNO055, BMP280, & LIS3DH INITIALIZATION ***
 
@@ -41,6 +45,7 @@ File dataFile;
 Adafruit_BNO055 bno;
 Adafruit_LIS3DH lis;
 Adafruit_BMP280 bmp;
+
 // __________________________________________________________________
 // *** GPS INITIALIZATION ***
 
@@ -50,27 +55,27 @@ Adafruit_GPS GPS(&GPSSerial);
 
 // __________________________________________________________________
 // *** VALUES ***
+
 #define DEBUG false                                             // Used for debugging purposes
 #define VBATPIN A7                                              // Analog reading of battery voltage
 #define LED 13                                                  // LED on M0 Feather
-#define SEPARATE 11                                             // Separate Pin - Pull Down Resistor
-unsigned long timeNow,timeLast,dataLog,radioTransmit,delta_t;   // Time values
-char fileName[20];                                              // .csv file, dynamically named "telemetryData_#"
-const uint8_t packetSize = 100;                                 // Use this value to change the radio packet size
+#define SEPARATE 11                                             // Separate Pin - Photoresistor/NPN Switch
+unsigned long timeNow,timeLast, delta_t, dataLog = 0;           // Time values
+uint8_t radioTransmit = 0;
+char fileName[30];                                              // .csv file, dynamically named "telemetryData_#"
+const uint8_t packetSize = 100;                                 // Use this value to dynamicaly change the radio packet size
 char radioPacket[packetSize];                                   // char array used for radio packet transmission
-String dataString;                                              // String used for radio packet transmission
-float rawVel,rawVelPrev,filteredVel,filteredVelPrev;            // Vehicle State Values
-float altVel,altVelPrev,alt0,alt,delta_alt,altPrev;
+float filteredVel,filteredVelPrev = 0;                          // Vehicle State Values
+float alt0,alt,delta_alt,altPrev = 0;
 sensors_event_t event;                                          // LIS3DH Sensor Values
-float gpsLat,gpsLon;                                            // GPS Latitude and Longitude
-bool separation;                                                // Vehicle separation detection boolean
+float gpsLat = 0,gpsLon = 0,gpsSpeed = 0,gpsAlt = 0;            // GPS Latitude and Longitude
+bool separation;                                                // Vehicle separation detection
 uint8_t buf[RH_RF95_MAX_MESSAGE_LEN];                           // Used for packet retrieval 
 uint8_t len = sizeof(buf);                                      // Used for packet retrieval
 float avgMotorThrust = 2585.5;                                  // Newtons
-float avgMotorMass = 8.974;                                     // Kilograms
+float avgMotorMass = 30;                                        // Kilograms
 float SeaLvlPressure = 1019.5;                                  // NOTE: Update with current sea level pressure (hPa)
                                                                 // Go to: https://forecast.weather.gov for Barometer readings
-
 struct stateStruct  {
   float accel;
 };
@@ -78,8 +83,10 @@ struct stateStruct  {
 
 
 
-// __________________________________________________________________
-// *** SETUP ***
+
+// _______________________________________________________________________________________
+//                                    *** SETUP ***
+// _______________________________________________________________________________________
 
 void setup()  {
 
@@ -89,14 +96,17 @@ void setup()  {
     digitalWrite(LED,LOW);
 
     Serial.begin(115200);
-    GPS.begin(9600);
-    GPS.sendCommand(PMTK_SET_NMEA_OUTPUT_RMCGGA);
-    GPS.sendCommand(PMTK_SET_NMEA_UPDATE_1HZ);
 
     //      while(!Serial)  {
     //        delay(100);
     //      }
-
+    
+    // Radio Module Manual Reset ------------------------------
+    digitalWrite(RFM95_RST, LOW);
+    delay(100);
+    digitalWrite(RFM95_RST, HIGH);
+    delay(100);
+    
     // Check RF95 and Frequency -------------------------------
     while(!rf95.init() || !rf95.setFrequency(RF95_FREQ)) {
         digitalWrite(LED,HIGH);
@@ -108,18 +118,13 @@ void setup()  {
     // TX Power set to max
     rf95.setTxPower(23, false);
 
-#if DEBUG
-    Serial << "Test" << "\n";
-#endif
-
-    //Send a signal that radio is ready to go
     sendMsg("TX OK: 862MHz");
     delay(1000);
 
     // Check SD ----------------------------------------------
     while(!SD.begin(cardSelect)) {
         sendMsg("No SD Card Detected");
-        delay(5000);
+        while(1);
     }
 
     for(int i=0;;i++)
@@ -127,17 +132,17 @@ void setup()  {
       String temp = "data_" + String(i) + ".csv";
       temp.toCharArray(fileName, sizeof(fileName));
       if (!SD.exists(fileName))  {
-        dataString = "File: " + temp;
-        sendMsg(dataString);
-        delay(1000);
+        sprintf(radioPacket, "File: data_%d", i);
+        rf95.send((uint8_t *)radioPacket, packetSize);
 
         dataFile = SD.open(fileName,FILE_WRITE);
-        dataFile.println("Time,Alt,Vel,Accel,Lat,Lon,Temp,Vbat,Sep");
+        dataFile.println("Time,Alt,rawVel,filteredVel,AX,AY,rawAZ,filteredAZ,Lat,Lon,Temp,Vbat,Sep");
         dataFile.close();
         break;
       }
     }
-
+    delay(1000);
+    
     // Check BNO055 ------------------------------------------
     if (!bno.begin()) {
         sendMsg("BNO055 Init Failed");
@@ -146,16 +151,16 @@ void setup()  {
 
     bno.setExtCrystalUse(true);
 
-    // Vector Calibration -----------------------------------
-    uint8_t system, gyro, accel, mag;           // Used to calibrate BNO055
+    // Vector Calibration ------------------------------------
+    uint8_t system, gyro, accel, mag; // Used to calibrate BNO055
     system = gyro = accel = mag = 0;
 
-    //      while(!bno.isFullyCalibrated()) {
-    //          bno.getCalibration(&system, &gyro, &accel, &mag);
-    //          dataString = "S:" + String(system) + " G:" + String(gyro) + " A:" + String(accel) + " M:" + String(mag);
-    //          sendMsg(dataString);
-    //          delay(500);
-    //      }
+    while(!bno.isFullyCalibrated()) {
+        bno.getCalibration(&system, &gyro, &accel, &mag);
+        sprintf(radioPacket, "S:%d G:%d A:%d M:%d",system,gyro,accel,mag);
+        rf95.send((uint8_t *)radioPacket, packetSize);
+        delay(500);
+    }
 
     sendMsg("BNO055 Init OK");
     delay(1000);
@@ -179,40 +184,38 @@ void setup()  {
     sendMsg("BMP280 Init OK");
     delay(1000);
           
-    // Wait for GPS Fix --------------------------------------
-//    while (!GPS.fix()) {
-//        sendMsg("No GPS Fix");
-//        if (GPS.newNMEAreceived()) {
-//            if (GPS.parse(GPS.lastNMEA()))
-//        }
-//        delay(1000);
-//    }
+    // Initialize GPS ----------------------------------------
 
-    sendMsg("GPS init OK");
+    GPS.begin(9600);
+    GPS.sendCommand(PMTK_SET_NMEA_OUTPUT_RMCGGA);
+    GPS.sendCommand(PMTK_SET_NMEA_UPDATE_1HZ);
+
+    sendMsg("GPS Init OK");
     delay(1000);
     
     // Check Separation Hardware -----------------------------
-    //      separation = digitalRead(SEPARATE);
-    //      
-    //      while (separation)  {
-    //        sendMsg("Separation Not Ready");
-    //        delay(5000);
-    //        
-    //        separation = digitalRead(SEPARATE);
-    //      }
+//    separation = digitalRead(SEPARATE);
+    
+//    while (separation)  {
+//      sendMsg("Separation Not Ready");
+//      delay(5000);
+//      
+//      separation = digitalRead(SEPARATE);
+//    }
+//  
+//    sendMsg("Separation Init OK");
 
-    sendMsg("Separation init OK");
+    // Wait for Startup Signal --------------------------------
+    String dataString;
+    while (dataString != "GO FOR LAUNCH") {
+     if (rf95.available())   {
+        if (rf95.recv(buf, &len))   {
+            dataString = String((char*)buf);
+        }
+      }
+    }
 
-    // Wait for Startup Signal -------------------------------
-    //      while (dataString != "GO FOR LAUNCH") {
-    //       if (rf95.available())   {
-    //          if (rf95.recv(buf, &len))   {
-    //              dataString = String((char*)buf);
-    //          }
-    //        }
-    //      }
-
-    // Initialize variables ----------------------------------
+    // Initialize variables -----------------------------------
     timeLast = millis();
     alt0 = bmp.readAltitude(SeaLvlPressure);
 
@@ -224,23 +227,29 @@ void setup()  {
 
 
 
-// __________________________________________________________________
-// *** LOOP ***
-// *** Will send TX packet containing: [Time, Altitude, Velocity, Acceleration, GPS Lat & Lon, Temperature, Vbat, Separation] ***
-
+// _______________________________________________________________________________________
+//                                  *** LOOP ***
+//                         Will send TX packet containing: 
+// [Time, Altitude, Velocity, Acceleration, GPS Lat & Lon, Temperature, Vbat, Separation]
+// _______________________________________________________________________________________
 void loop() {
     struct stateStruct rawState, filteredState;
-
-    if (!separation) {
       
-      // TIMESTAMP:
-      delta_t = (timeNow = millis()) - timeLast;
-      timeLast = timeNow;    
-      
+    // TIMESTAMP:
+    delta_t = (timeNow = millis()) - timeLast;
+    
+    if (delta_t >= 10)  {
+      timeLast = timeNow; 
+    
       // Read Altitude
       alt = bmp.readAltitude(SeaLvlPressure) - alt0;
       delta_alt = alt - altPrev;
       altPrev = alt;
+
+      // Check for New GPS Packet
+      if (GPS.newNMEAreceived()) {
+        GPS.parse(GPS.lastNMEA());
+      }
       
       // Get Acceleration Vector Values
       imu::Vector<3> gravity = bno.getVector(Adafruit_BNO055::VECTOR_GRAVITY);
@@ -252,98 +261,78 @@ void loop() {
       float lx = (float)event.acceleration.x;
       float ly = (float)event.acceleration.y; 
       float lz = (float)event.acceleration.z;
-
-      float accelx = lx - gx;
-      float accely = ly - gy;
-      rawState.accel = lz - gz;
   
-      // KALMAN FILTER:
+      float accelx = float(lx - gx);
+      float accely = float(ly - gy);
+      rawState.accel = float(lz - gz);
+  
+      // Kalman Filter
       kalmanFilter(rawState, &filteredState);
   
-      // VELOCITY CALCULATIONS:
-      // from raw acceleration and altitude
-      float temp = sq(rawVelPrev) - 2*rawState.accel*delta_alt;
-      if (temp < 0) {
-        rawVel = -sqrt(abs(temp));
-      }
-      else  {
-        rawVel = sqrt(temp);    
-      }
-      rawVelPrev = rawVel;
-    
-      // from filtered acceleration and altitude
-      temp = sq(filteredVelPrev) - 2*filteredState.accel*delta_alt;
+      // Velocity Calculations
+      float temp = sq(filteredVelPrev) + (2*filteredState.accel*delta_alt);
       if (temp < 0) {
         filteredVel = -sqrt(abs(temp));
       }
       else  {
-        filteredVel = sqrt(temp);    
+        filteredVel = sqrt(temp);
       }
       filteredVelPrev = filteredVel;
-    
-      // from altitude and time
-      altVel = ((2*delta_alt)/delta_t) - altVelPrev;
-      altVelPrev = altVel;
       
-      #if DEBUG
-        Serial << "accelx: " << accelx << '\n';
-        Serial << "accely: " << accely << '\n';
-        Serial << "raw accelz: " << rawState.accel << '\n'; 
-        Serial << "filtered accelz: " << filteredState.accel << '\n'; 
-      #endif
-      
-      // Append Data
+      // Data Transmission
       dataLog += delta_t;
-      if (dataLog > 100) {
-    
+      if (dataLog >= 500) {
+      
         // Read Battery Voltage
         float vbat = ((analogRead(VBATPIN))*3.3)/512;  // Convert to voltage  
     
         // Read Separation
-//          separation = digitalRead(SEPARATE);
+        separation = digitalRead(SEPARATE);
     
         // Read Temperature
         int temperature = bmp.readTemperature();
-
+  
         // Read GPS coordinates
-//      if (GPS.newNMEAreceived()) {
-//        if (GPS.parse(GPS.lastNMEA()))  {
-//          gpsLat = GPS.lat;
-//          gpsLon = GPS.lon;
-//        }
-//      }
+        if (GPS.fix)  {
+          gpsLat = GPS.lat;
+          gpsLon = GPS.lon;
+          gpsSpeed = GPS.speed;
+          gpsAlt = GPS.altitude;
+        }
 
         // Open SD File
         dataFile = SD.open(fileName,FILE_WRITE);
-        
-        dataString  = String(float(timeNow/1000)) + ",";
-        dataString += String(alt) + ",";
-        dataString += String(rawVel) + ",";
-        dataString += String(filteredVel) + ",";
-        dataString += String(altVel) + ",";
-        dataString += String(accelx) + ",";
-        dataString += String(accely) + ",";
-        dataString += String(rawState.accel) + ",";
-        dataString += String(filteredState.accel) + ",";
-//          dataString += String(gpsLat) + ",";
-//          dataString += String(gpsLon) + ",";
-        dataString += String(temperature) + ",";
-        dataString += String(vbat) + ",";
-        dataString += String(separation);
-        radioTransmit += dataLog;
+  
+        sprintf(radioPacket, "%d,%.2f,%.2f,%.2f,%.2f,%.2f,%.2f,%.3f,%.3f,%.2f,%.2f,%d,%.2f,%d", timeNow,alt,filteredVel,accelx,accely,rawState.accel,filteredState.accel,gpsLat,gpsLon,gpsSpeed,gpsAlt,temperature,vbat,separation);
+  //      radioTransmit += 1;
         dataLog = 0;
-
-        // Save data to SD file every 0.1 sec and radio transmit every 0.5 sec
-        dataFile.println(dataString);
-        if (radioTransmit > 500) {
-          sendMsg(dataString);
-          radioTransmit = 0;
-        }
-
+  
+        // Save data to SD file ~0.1 sec and radio transmit ~0.5 sec
+        dataFile.println(radioPacket);
+        rf95.send((uint8_t *)radioPacket, packetSize);
+        
+  //      if (radioTransmit = 5) {
+  //        sendMsg(radioPacket);
+  //        radioTransmit = 0;
+  //      }
+  
         // Close SD File
         dataFile.close();
       }
-   }
+    
+      #if DEBUG
+        Serial.println(dataLog);
+        Serial.println(radioTransmit);
+        Serial.print("delta_t: ");
+        Serial.println(delta_t);
+        Serial.print("raw accelz: ");
+        Serial.println(rawState.accel);
+        Serial.print("filtered accelz: ");
+        Serial.println(filteredState.accel);
+        Serial.print("filteredVel: ");
+        Serial.println(filteredVel);
+      #endif
+    }
 }
 
 
@@ -351,13 +340,12 @@ void loop() {
 
 
 
-// __________________________________________________________________
-// *** Radio Message Function ***
+// _______________________________________________________________________________________
+//                        *** Radio String Message Function ***
+// _______________________________________________________________________________________
 void sendMsg(String dataString) {
-    digitalWrite(LED,HIGH);
     strncpy(radioPacket, dataString.c_str(), sizeof(radioPacket));
     rf95.send((uint8_t *)radioPacket, packetSize);
-    digitalWrite(LED,LOW);
 }
 
 
@@ -365,8 +353,9 @@ void sendMsg(String dataString) {
 
 
 
-// __________________________________________________________________
-// *** KALMAN FILTER FUNCTION ***
+// _______________________________________________________________________________________
+//                           *** KALMAN FILTER FUNCTION ***
+// _______________________________________________________________________________________
 void kalmanFilter(struct stateStruct rawState, struct stateStruct* filteredState) {
     static float p_k = 0;                
     static float x_k = 0;
@@ -379,7 +368,7 @@ void kalmanFilter(struct stateStruct rawState, struct stateStruct* filteredState
     // If P -> 0 : measurement updates are mostly ignored
     // Q is used to ensure P isn't too small or goes to zero.
     static float q_k = 0.2;
-    static float r_k = 7;
+    static float r_k = 10;
 
     // Estimate the acceleration for the kalman filter
     if (z_k > 10)  {
@@ -402,11 +391,13 @@ void kalmanFilter(struct stateStruct rawState, struct stateStruct* filteredState
     filteredState->accel = x_k;
     
     #if DEBUG
-      Serial << "delta_t: " << delta_t << '\n';
-      Serial << "u_k: " << u_k << '\n';
-      Serial << "k_gain: " << k_gain << '\n';
-      Serial << "x_k: " << x_k << '\n';
-      Serial << "p_k: " << p_k << '\n';
-      Serial.println(filteredState->accel);
+      Serial.print("u_k: ");
+      Serial.println(u_k);
+      Serial.print("k_gain: ");
+      Serial.println(k_gain);
+      Serial.print("x_k: ");
+      Serial.println(x_k);
+      Serial.print("p_k: ");
+      Serial.println(p_k);
     #endif
 }
