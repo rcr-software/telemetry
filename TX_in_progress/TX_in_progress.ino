@@ -56,19 +56,20 @@ Adafruit_GPS GPS(&GPSSerial);
 // __________________________________________________________________
 // *** VALUES ***
 
+#define skip_calibrate false                                    // Skip BNO055 Calibration
 #define DEBUG false                                             // Used for debugging purposes
 #define VBATPIN A7                                              // Analog reading of battery voltage
 #define LED 13                                                  // LED on M0 Feather
-#define SEPARATE 11                                             // Separate Pin - Photoresistor/NPN Switch
-unsigned long timeNow,timeLast, delta_t, dataLog = 0;           // Time values
-uint8_t radioTransmit = 0;
-char fileName[30];                                              // .csv file, dynamically named "telemetryData_#"
-const uint8_t packetSize = 100;                                 // Use this value to dynamicaly change the radio packet size
-char radioPacket[packetSize];                                   // char array used for radio packet transmission
+#define SEPARATE A5                                              // Separate Pin - Photoresistor/NPN Switch
+unsigned long timeNow,timeLast,delta_t;                         // Time values
+int dataLog = 0,radioLog = 0;
+char fileName[30];                                              // .csv file, dynamically named "data_#"
+const uint8_t packetSize = 64;                                  // Use this value to dynamicaly change the radio packet size
+char radioPacket[packetSize];                                   // Char array used for radio packet transmission
 float filteredVel,filteredVelPrev = 0;                          // Vehicle State Values
 float alt0,alt,delta_alt,altPrev = 0;
 sensors_event_t event;                                          // LIS3DH Sensor Values
-float gpsLat = 0,gpsLon = 0,gpsSpeed = 0,gpsAlt = 0;            // GPS Latitude and Longitude
+float gpsLat,gpsLon,gpsSpeed,gpsAlt;                            // GPS values
 bool separation;                                                // Vehicle separation detection
 uint8_t buf[RH_RF95_MAX_MESSAGE_LEN];                           // Used for packet retrieval 
 uint8_t len = sizeof(buf);                                      // Used for packet retrieval
@@ -91,6 +92,7 @@ struct stateStruct  {
 void setup()  {
 
     pinMode(RFM95_RST, OUTPUT);
+    pinMode(SEPARATE, INPUT_PULLUP);
     digitalWrite(RFM95_RST,HIGH);
     pinMode(LED, OUTPUT);
     digitalWrite(LED,LOW);
@@ -117,10 +119,28 @@ void setup()  {
 
     // TX Power set to max
     rf95.setTxPower(23, false);
-
+    
+    // Wait for Initialize Signal -----------------------------
+    String dataString;
+    while (dataString != "BEGIN STARTUP") {
+     if (rf95.available())   {
+        if (rf95.recv(buf, &len))   {
+            dataString = String((char*)buf);
+        }
+      }
+    }
     sendMsg("TX OK: 862MHz");
     delay(1000);
+    
+    // Initialize GPS ----------------------------------------
 
+    GPS.begin(9600);
+    GPS.sendCommand(PMTK_SET_NMEA_OUTPUT_RMCGGA);
+    GPS.sendCommand(PMTK_SET_NMEA_UPDATE_1HZ);
+
+    sendMsg("GPS Init OK");
+    delay(1000);
+    
     // Check SD ----------------------------------------------
     while(!SD.begin(cardSelect)) {
         sendMsg("No SD Card Detected");
@@ -136,7 +156,7 @@ void setup()  {
         rf95.send((uint8_t *)radioPacket, packetSize);
 
         dataFile = SD.open(fileName,FILE_WRITE);
-        dataFile.println("Time,Alt,rawVel,filteredVel,AX,AY,rawAZ,filteredAZ,Lat,Lon,Temp,Vbat,Sep");
+        dataFile.println("Time,Alt,filtVel,filtAccel,Lat,Lon,Sep,aX,aY,aZ,gpsSpeed,gpsAlt,Temp");
         dataFile.close();
         break;
       }
@@ -155,12 +175,14 @@ void setup()  {
     uint8_t system, gyro, accel, mag; // Used to calibrate BNO055
     system = gyro = accel = mag = 0;
 
-    while(!bno.isFullyCalibrated()) {
-        bno.getCalibration(&system, &gyro, &accel, &mag);
-        sprintf(radioPacket, "S:%d G:%d A:%d M:%d",system,gyro,accel,mag);
-        rf95.send((uint8_t *)radioPacket, packetSize);
-        delay(500);
-    }
+    #if skip_calibrate
+        while(!bno.isFullyCalibrated()) {
+            bno.getCalibration(&system, &gyro, &accel, &mag);
+            sprintf(radioPacket, "S:%d G:%d A:%d M:%d",system,gyro,accel,mag);
+            rf95.send((uint8_t *)radioPacket, packetSize);
+            delay(500);
+        }
+    #endif
 
     sendMsg("BNO055 Init OK");
     delay(1000);
@@ -183,30 +205,9 @@ void setup()  {
           
     sendMsg("BMP280 Init OK");
     delay(1000);
-          
-    // Initialize GPS ----------------------------------------
 
-    GPS.begin(9600);
-    GPS.sendCommand(PMTK_SET_NMEA_OUTPUT_RMCGGA);
-    GPS.sendCommand(PMTK_SET_NMEA_UPDATE_1HZ);
-
-    sendMsg("GPS Init OK");
-    delay(1000);
-    
-    // Check Separation Hardware -----------------------------
-//    separation = digitalRead(SEPARATE);
-    
-//    while (separation)  {
-//      sendMsg("Separation Not Ready");
-//      delay(5000);
-//      
-//      separation = digitalRead(SEPARATE);
-//    }
-//  
-//    sendMsg("Separation Init OK");
-
-    // Wait for Startup Signal --------------------------------
-    String dataString;
+    // Wait for Start Signal ---------------------------------
+    sendMsg("Ready to Start");
     while (dataString != "GO FOR LAUNCH") {
      if (rf95.available())   {
         if (rf95.recv(buf, &len))   {
@@ -234,7 +235,7 @@ void setup()  {
 // _______________________________________________________________________________________
 void loop() {
     struct stateStruct rawState, filteredState;
-      
+    
     // TIMESTAMP:
     delta_t = (timeNow = millis()) - timeLast;
     
@@ -247,6 +248,8 @@ void loop() {
       altPrev = alt;
 
       // Check for New GPS Packet
+      GPS.read();
+     
       if (GPS.newNMEAreceived()) {
         GPS.parse(GPS.lastNMEA());
       }
@@ -262,10 +265,10 @@ void loop() {
       float ly = (float)event.acceleration.y; 
       float lz = (float)event.acceleration.z;
   
-      float accelx = float(lx - gx);
-      float accely = float(ly - gy);
-      rawState.accel = float(lz - gz);
-  
+      float accelx = lx - gx;
+      float accely = ly - gy;
+      rawState.accel = lz - gz;
+
       // Kalman Filter
       kalmanFilter(rawState, &filteredState);
   
@@ -281,48 +284,49 @@ void loop() {
       
       // Data Transmission
       dataLog += delta_t;
+//      radioLog += delta_t;
       if (dataLog >= 500) {
-      
-        // Read Battery Voltage
-        float vbat = ((analogRead(VBATPIN))*3.3)/512;  // Convert to voltage  
-    
-        // Read Separation
-        separation = digitalRead(SEPARATE);
-    
-        // Read Temperature
-        int temperature = bmp.readTemperature();
-  
-        // Read GPS coordinates
-        if (GPS.fix)  {
-          gpsLat = GPS.lat;
-          gpsLon = GPS.lon;
-          gpsSpeed = GPS.speed;
-          gpsAlt = GPS.altitude;
-        }
-
-        // Open SD File
-        dataFile = SD.open(fileName,FILE_WRITE);
-  
-        sprintf(radioPacket, "%d,%.2f,%.2f,%.2f,%.2f,%.2f,%.2f,%.3f,%.3f,%.2f,%.2f,%d,%.2f,%d", timeNow,alt,filteredVel,accelx,accely,rawState.accel,filteredState.accel,gpsLat,gpsLon,gpsSpeed,gpsAlt,temperature,vbat,separation);
-  //      radioTransmit += 1;
-        dataLog = 0;
-  
-        // Save data to SD file ~0.1 sec and radio transmit ~0.5 sec
-        dataFile.println(radioPacket);
-        rf95.send((uint8_t *)radioPacket, packetSize);
+          dataLog = 0;
         
-  //      if (radioTransmit = 5) {
-  //        sendMsg(radioPacket);
-  //        radioTransmit = 0;
-  //      }
+          // Read Battery Voltage
+          float vbat = ((analogRead(VBATPIN))*3.3)/512;  // Convert to voltage  
+      
+          // Read Separation
+          separation = digitalRead(SEPARATE);
+      
+          // Read Temperature
+          int temperature = bmp.readTemperature();
+    
+          // Read GPS coordinates
+          if (GPS.fix)  {
+            gpsLat = GPS.latitudeDegrees;
+            gpsLon = GPS.longitudeDegrees;
+            gpsSpeed = GPS.speed;
+            gpsAlt = GPS.altitude;
+          }
   
-        // Close SD File
-        dataFile.close();
+          // Open SD File
+          dataFile = SD.open(fileName,FILE_WRITE);
+  
+          snprintf(radioPacket,packetSize, "%d,%.2f,%.2f,%.2f,%.3f,%.3f,%d,", timeNow,alt,filteredVel,filteredState.accel,gpsLat,gpsLon,separation);
+    
+          // Save data to SD file ~0.1 sec and radio transmit ~0.5 sec
+          dataFile.print(radioPacket);
+          rf95.send((uint8_t *)radioPacket, packetSize);
+          
+//          if (radioLog >= 500) {
+//            radioLog = 0;
+//            rf95.send((uint8_t *)radioPacket, packetSize);
+//          }
+          
+          snprintf(radioPacket,packetSize, "%.2f,%.2f,%.2f,%.2f,%.2f,%d", accelx,accely,rawState.accel,gpsSpeed,gpsAlt,temperature);
+          dataFile.println(radioPacket);
+          
+          // Close SD File
+          dataFile.close();
       }
     
       #if DEBUG
-        Serial.println(dataLog);
-        Serial.println(radioTransmit);
         Serial.print("delta_t: ");
         Serial.println(delta_t);
         Serial.print("raw accelz: ");
@@ -341,7 +345,7 @@ void loop() {
 
 
 // _______________________________________________________________________________________
-//                        *** Radio String Message Function ***
+//                        *** RADIO STRING MESSAGE FUNCTION ***
 // _______________________________________________________________________________________
 void sendMsg(String dataString) {
     strncpy(radioPacket, dataString.c_str(), sizeof(radioPacket));
@@ -374,8 +378,9 @@ void kalmanFilter(struct stateStruct rawState, struct stateStruct* filteredState
     if (z_k > 10)  {
       u_k += avgMotorThrust / avgMotorMass;
     }
-    else if (alt < 20) {
+    else if (alt < 20) {  // On launch pad
       u_k = 0;
+      filteredVel = 0;
     }
     
     //PREDICT:
