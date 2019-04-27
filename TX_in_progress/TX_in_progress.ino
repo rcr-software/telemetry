@@ -17,7 +17,6 @@
 #include <Adafruit_LIS3DH.h>
 #include <Adafruit_GPS.h>
 #include <utility/imumaths.h>
-#include <stdio.h>
 
 // __________________________________________________________________
 // *** FEATHER INITIALIZATION ***
@@ -74,7 +73,7 @@ bool separation;                                                // Vehicle separ
 uint8_t buf[RH_RF95_MAX_MESSAGE_LEN];                           // Used for packet retrieval 
 uint8_t len = sizeof(buf);                                      // Used for packet retrieval
 float avgMotorThrust = 2585.5;                                  // Newtons
-float avgMotorMass = 30;                                        // Kilograms
+float avgVehicleMass = 30;                                      // Kilograms
 float SeaLvlPressure = 1019.5;                                  // NOTE: Update with current sea level pressure (hPa)
                                                                 // Go to: https://forecast.weather.gov for Barometer readings
 struct stateStruct  {
@@ -156,7 +155,7 @@ void setup()  {
         rf95.send((uint8_t *)radioPacket, packetSize);
 
         dataFile = SD.open(fileName,FILE_WRITE);
-        dataFile.println("Time,Alt,filtVel,filtAccel,Lat,Lon,Sep,aX,aY,aZ,gpsSpeed,gpsAlt,Temp");
+        dataFile.println("Time,Alt,filtVel,filtAccel,Lat,Lon,Sep,aX,aY,aZ,rawAccel,gpsSpeed,gpsAlt,Vbat,Temp");
         dataFile.close();
         break;
       }
@@ -231,7 +230,7 @@ void setup()  {
 // _______________________________________________________________________________________
 //                                  *** LOOP ***
 //                         Will send TX packet containing: 
-// [Time, Altitude, Velocity, Acceleration, GPS Lat & Lon, Temperature, Vbat, Separation]
+//      [Time, Altitude, Velocity, Acceleration, GPS Lat & Lon, and Separation]
 // _______________________________________________________________________________________
 void loop() {
     struct stateStruct rawState, filteredState;
@@ -267,8 +266,15 @@ void loop() {
   
       float accelx = lx - gx;
       float accely = ly - gy;
-      rawState.accel = lz - gz;
+      float accelz = lz - gz;
 
+      float accelSum = accelx + accely + accelz;
+      float accelMag = sqrt(sq(accelx) + sq(accely) + sq(accelz));
+      if (accelSum < 0) {
+        rawState.accel = -accelMag;}
+      else  {
+        rawState.accel = accelMag;}
+      
       // Kalman Filter
       kalmanFilter(rawState, &filteredState);
   
@@ -285,7 +291,7 @@ void loop() {
       // Data Transmission
       dataLog += delta_t;
 //      radioLog += delta_t;
-      if (dataLog >= 500) {
+      if (dataLog >= 250) {
           dataLog = 0;
         
           // Read Battery Voltage
@@ -308,7 +314,7 @@ void loop() {
           // Open SD File
           dataFile = SD.open(fileName,FILE_WRITE);
   
-          snprintf(radioPacket,packetSize, "%d,%.2f,%.2f,%.2f,%.3f,%.3f,%d,", timeNow,alt,filteredVel,filteredState.accel,gpsLat,gpsLon,separation);
+          snprintf(radioPacket,packetSize, "%.2f,%.2f,%.2f,%.2f,%.3f,%.3f,%d", float(timeNow)/1000,alt,filteredVel,filteredState.accel,gpsLat,gpsLon,separation);
     
           // Save data to SD file ~0.1 sec and radio transmit ~0.5 sec
           dataFile.print(radioPacket);
@@ -319,7 +325,7 @@ void loop() {
 //            rf95.send((uint8_t *)radioPacket, packetSize);
 //          }
           
-          snprintf(radioPacket,packetSize, "%.2f,%.2f,%.2f,%.2f,%.2f,%d", accelx,accely,rawState.accel,gpsSpeed,gpsAlt,temperature);
+          snprintf(radioPacket,packetSize, "%.2f,%.2f,%.2f,%.2f,%.2f,%.2f,%.2f,%d", accelx,accely,accelz,rawState.accel,gpsSpeed,gpsAlt,vbat,temperature);
           dataFile.println(radioPacket);
           
           // Close SD File
@@ -376,7 +382,7 @@ void kalmanFilter(struct stateStruct rawState, struct stateStruct* filteredState
 
     // Estimate the acceleration for the kalman filter
     if (z_k > 10)  {
-      u_k += avgMotorThrust / avgMotorMass;
+      u_k += avgMotorThrust / avgVehicleMass;
     }
     else if (alt < 20) {  // On launch pad
       u_k = 0;
