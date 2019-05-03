@@ -58,7 +58,7 @@ void setup()  {
     while(1);
   }
   
-  Serial.println("RX OK: 862MHz");
+  Serial.println("RX OK: 862 MHz");
   delay(1000);
 
   rf95.setTxPower(23, false);
@@ -76,6 +76,7 @@ void loop()  {
     if (rf95.recv(buf, &len))   {
       digitalWrite(LED, HIGH);
       Serial.print((char*)buf);
+      Serial.print(",");
       Serial.println(rf95.lastRssi(), DEC);
       digitalWrite(LED, LOW);
     }
@@ -89,7 +90,7 @@ void loop()  {
 
 void systemStart()  {
   String dataString;
-  char radioPacket[] = "BEGIN STARTUP";
+  char radioPacket[] = "BEGIN STARTUP TX1";
   unsigned long timeNow, timeLast;
   
   // waits for input from user to begin initialization
@@ -136,7 +137,7 @@ void systemStart()  {
   
   // Sends start signals to TX until we get a reply
   timeLast = millis();
-  strncpy(radioPacket, "GO FOR LAUNCH", sizeof(radioPacket));
+  strncpy(radioPacket, "TX1 GO FOR LAUNCH", sizeof(radioPacket));
   while (!rf95.available())  {
     timeNow = millis();
     if ((timeNow - timeLast) >= 1000) {
