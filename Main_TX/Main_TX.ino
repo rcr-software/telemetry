@@ -19,7 +19,7 @@
 #include <utility/imumaths.h>
 
 // __________________________________________________________________
-// *** FEATHER INITIALIZATION ***
+// *** RADIO FEATHER INITIALIZATION ***
 
 #define RFM95_RST     11   // "A"
 #define RFM95_CS      10   // "B"
@@ -56,14 +56,14 @@ Adafruit_GPS GPS(&GPSSerial);
 // *** VALUES ***
 
 #define skip_calibrate false                                    // Skip BNO055 Calibration
-#define DEBUG false                                             // Used for debugging purposes
+#define DEBUG true                                             // Used for debugging purposes
 #define VBATPIN A7                                              // Analog reading of battery voltage
 #define LED 13                                                  // LED on M0 Feather
 #define SEPARATE A5                                             // Separate Pin - Photoresistor/NPN Switch
 unsigned long timeNow,timeLast,delta_t;                         // Time values
 int dataLog = 0,radioLog = 0;                                   // Data logging time values
 char fileName[30];                                              // .csv file, dynamically named "data_#"
-const uint8_t packetSize = 100;                                 // radio packet size - MAX PACKET LENGTH = 251 BYTES
+const int packetSize = 100;                                           // radio packet size - MAX PACKET LENGTH = 251 BYTES
 char radioPacket[packetSize];                                   // Char array used for radio packet transmission
 uint8_t buf[RH_RF95_MAX_MESSAGE_LEN];                           // Used for packet retrieval 
 uint8_t len = sizeof(buf);                                      // Used for packet retrieval
@@ -72,8 +72,8 @@ float velPrev = 0;                                              // Past state ve
 sensors_event_t event;                                          // LIS3DH Sensor Values
 float gpsLat = 0,gpsLon = 0,gpsSpeed = 0,gpsAlt = 0;            // GPS values
 bool separation;                                                // Vehicle separation detection
-float avgMotorThrust = 2200;                                    // Newtons
-float avgVehicleMass = 22.7;                                    // Kilograms
+//float avgMotorThrust = 2200;                                    // Newtons
+//float avgVehicleMass = 22.7;                                    // Kilograms
 float SeaLvlPressure = 1012.2;                                  // NOTE: Update with current sea level pressure (hPa)
                                                                 // Go to: https://forecast.weather.gov for Barometer readings
 
@@ -110,6 +110,7 @@ void setup()  {
     delay(100);
     
     // Check RF95 and Frequency -------------------------------
+    // LED will blink red on TX board if init fails
     while(!rf95.init() || !rf95.setFrequency(RF95_FREQ)) {
         digitalWrite(LED,HIGH);
         delay(1000);
@@ -122,7 +123,7 @@ void setup()  {
     
     // Wait for Initialize Signal -----------------------------
     String dataString;
-    while (dataString != "BEGIN STARTUP TX1") {
+    while (dataString != "BEGIN STARTUP TX_862") {
      if (rf95.available())   {
         if (rf95.recv(buf, &len))   {
             dataString = String((char*)buf);
@@ -209,7 +210,7 @@ void setup()  {
 
     // Wait for Start Signal ---------------------------------
     sendMsg("Ready to Start");
-    while (dataString != "TX1 GO FOR LAUNCH") {
+    while (dataString != "TX_862 GO FOR LAUNCH") {
      if (rf95.available())   {
         if (rf95.recv(buf, &len))   {
             dataString = String((char*)buf);
@@ -320,13 +321,25 @@ void loop() {
       }
     
       #if DEBUG
-        Serial.print("delta_t: ");
+        Serial.print("delta_t:");
         Serial.println(delta_t);
-        Serial.print("accel: ");
+        Serial.print("accel:");
         Serial.println(accel);
-        Serial.print("vel: ");
+        Serial.print("lx:");
+        Serial.print(lx);
+        Serial.print(" ly:");
+        Serial.print(ly);
+        Serial.print(" lz:");
+        Serial.println(lz);
+        Serial.print("gx:");
+        Serial.print(gx);
+        Serial.print(" gy:");
+        Serial.print(gy);
+        Serial.print(" gz:");
+        Serial.println(gz);
+        Serial.print("vel:");
         Serial.println(vel);
-        Serial.print("alt: ");
+        Serial.print("alt:");
         Serial.println(alt);
       #endif
    }

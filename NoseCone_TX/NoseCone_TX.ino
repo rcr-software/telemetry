@@ -14,17 +14,10 @@
 #include <Adafruit_Sensor.h>
 #include <Adafruit_BMP280.h>
 #include <Adafruit_GPS.h>
-#include <stdio.h>
 
 // __________________________________________________________________
-// *** FEATHER INITIALIZATION ***
+// *** RADIO FEATHER INITIALIZATION ***
 
-// for feather m0  
-//#define RFM95_CS 8
-//#define RFM95_RST 4
-//#define RFM95_INT 3
-
-// for featherwing
 #define RFM95_RST     11   // "A"
 #define RFM95_CS      10   // "B"
 #define RFM95_INT     6    // "D"
@@ -34,6 +27,12 @@
 
 // Singleton instance of the radio driver
 RH_RF95 rf95(RFM95_CS, RFM95_INT);
+
+// __________________________________________________________________
+// *** SD INITIALIZATION ***
+
+#define cardSelect    4 
+File dataFile;
 
 // __________________________________________________________________
 // *** BNO055 & BMP280 INITIALIZATION ***
@@ -56,10 +55,10 @@ Adafruit_GPS GPS(&GPSSerial);
 #define SEPARATE A5                                     // Separate Pin - Pull Down Resistor
 unsigned long timeNow,timeLast,delta_t;                 // Time values
 char fileName[30];                                      // .csv file, dynamically named "data_#"
-const uint8_t packetSize = 64;                          // Use this value to change the radio packet size
+const uint8_t packetSize = 100;                         // Use this value to change the radio packet size
 char radioPacket[packetSize];                           // char array used for radio packet transmission
-float alt, alt0;                                        // BMP280 altitude reading
-float gpsLat = 0,gpsLon = 0,gpsSpeed = 0,gpsAlt = 0;    // GPS values
+float alt0;                                             // Pad altitude
+float gpsLat,gpsLon,gpsSpeed,gpsAlt;                    // GPS values
 bool separation;                                        // Vehicle separation detection boolean
 uint8_t buf[RH_RF95_MAX_MESSAGE_LEN];                   // Used for packet retrieval 
 uint8_t len = sizeof(buf);                              // Used for packet retrieval
@@ -98,6 +97,7 @@ void setup()  {
 
     
 //    Check RF95 and Frequency -------------------------------
+    // LED will blink red on TX board if init fails
     while(!rf95.init() || !rf95.setFrequency(RF95_FREQ)) {
         digitalWrite(LED,HIGH);
         delay(1000);
@@ -108,30 +108,40 @@ void setup()  {
     // TX Power set to max
     rf95.setTxPower(23, false);
 
-    sendMsg("TX OK: 862MHz");
+    // Wait for Initialize Signal -----------------------------
+    String dataString;
+    while (dataString != "BEGIN STARTUP TX_915") {
+     if (rf95.available())   {
+        if (rf95.recv(buf, &len))   {
+            dataString = String((char*)buf);
+        }
+      }
+    }
+
+    sendMsg("TX OK: 915 MHz");
     delay(1000);
     
     // Check SD ----------------------------------------------
-//    while(!SD.begin(cardSelect)) {
-//        sendMsg("No SD Card Detected");
-//        while(1);
-//    }
-//
-//    for(int i=0;;i++)
-//    {
-//      String temp = "data_" + String(i) + ".csv";
-//      temp.toCharArray(fileName, sizeof(fileName));
-//      if (!SD.exists(fileName))  {
-//        sprintf(radioPacket, "File: data_%d", i);
-//        rf95.send((uint8_t *)radioPacket, packetSize);
-//
-//        dataFile = SD.open(fileName,FILE_WRITE);
-//        dataFile.println("Time,Alt,rawVel,filteredVel,AX,AY,rawAZ,filteredAZ,Lat,Lon,Temp,Vbat,Sep");
-//        dataFile.close();
-//        break;
-//      }
-//    }
-//    delay(1000);
+    while(!SD.begin(cardSelect)) {
+        sendMsg("No SD Card Detected");
+        while(1);
+    }
+
+    for(int i=0;;i++)
+    {
+      String temp = "data_" + String(i) + ".csv";
+      temp.toCharArray(fileName, sizeof(fileName));
+      if (!SD.exists(fileName))  {
+        sprintf(radioPacket, "File: data_%d", i);
+        rf95.send((uint8_t *)radioPacket, packetSize);
+
+        dataFile = SD.open(fileName,FILE_WRITE);
+        dataFile.println("Time,Alt,gpsAlt,gpsSpeed,Lat,Lon,Vbat,Temp,Sep");
+        dataFile.close();
+        break;
+      }
+    }
+    delay(1000);
     
     //Check BMP280 ------------------------------------------
     if (!bmp.begin()) {   
@@ -152,17 +162,17 @@ void setup()  {
     delay(1000);
 
     //Wait for Startup Signal -------------------------------
-    String dataString;
-    while (dataString != "GO FOR LAUNCH") {
+    sendMsg("Ready to Start");
+    while (dataString != "TX_915 GO FOR LAUNCH") {
      if (rf95.available())   {
         if (rf95.recv(buf, &len))   {
             dataString = String((char*)buf);
         }
       }
     }
+    
     //Initialize rocket variables ----------------------------------
     timeLast = millis();
-    alt0 = bmp.readAltitude(SeaLvlPressure);
 
 }   // END SETUP
 
@@ -175,7 +185,7 @@ void setup()  {
 // _______________________________________________________________________________________
 //                                  *** LOOP ***
 //                         Will send TX packet containing: 
-//          [Time, Altitude, GPS Lat & Lon, Temperature, Vbat, Separation]
+// [Time, Altitude, GPS Speed, GPS Altitude, GPS Lat & Lon, Temperature, Vbat, Separation]
 // _______________________________________________________________________________________
 
 void loop() {
@@ -184,45 +194,45 @@ void loop() {
    
    // Check for New GPS Packet
    GPS.read();
-   
    if (GPS.newNMEAreceived()) {
-      GPS.parse(GPS.lastNMEA());
+     if (!GPS.parse(GPS.lastNMEA()))  
+       return;
    }
   
-   if (delta_t >= 500) {
+   if (delta_t >= 200) {
       timeLast = timeNow;
       
       // Read Altitude
-      alt = bmp.readAltitude(SeaLvlPressure) - alt0;
+      float alt = bmp.readAltitude(SeaLvlPressure);
       
       // Read Battery Voltage
-//      float vbat = ((analogRead(VBATPIN))*3.3)/512;  // Convert to voltage  
+      float vbat = ((analogRead(VBATPIN))*3.3)/512;  // Convert to voltage  
   
       // Read Separation
       separation = digitalRead(SEPARATE);
   
       // Read Temperature
-//      int temperature = bmp.readTemperature();
+      int temperature = bmp.readTemperature();
 
       // Read GPS coordinates
       if (GPS.fix)  {
-        gpsLat = GPS.lat;
-        gpsLon = GPS.lon;
+        gpsLat = GPS.latitudeDegrees;
+        gpsLon = GPS.longitudeDegrees;
         gpsSpeed = GPS.speed;
         gpsAlt = GPS.altitude;
       }
       
       // Open SD File
-//      dataFile = SD.open(fileName,FILE_WRITE);
-
-      sprintf(radioPacket, "%d,%.2f,%.2f,%.2f,%.3f,%.3f,%d", timeNow,alt,gpsAlt,gpsSpeed,gpsLat,gpsLon,separation);
-
+      dataFile = SD.open(fileName,FILE_WRITE);
+      
       // Save Data to SD File and Radio Transmit
-//      dataFile.println(dataString);
+      sprintf(radioPacket, "%.2f,%.2f,%.2f,%.2f,%.4f,%.4f,%.2f,%d,%d", float(timeNow)/1000,alt,gpsAlt,gpsSpeed,gpsLat,gpsLon,vbat,temperature,separation);
+      dataFile.println(radioPacket);
       rf95.send((uint8_t *)radioPacket, packetSize);
+      rf95.waitPacketSent();
             
       // Close SD File
-//      dataFile.close();
+      dataFile.close();
    }
 }
 
@@ -230,9 +240,9 @@ void loop() {
 
 
 
-
-// __________________________________________________________________
-// *** Radio Message Function ***
+// _______________________________________________________________________________________
+//                        *** RADIO STRING MESSAGE FUNCTION ***
+// _______________________________________________________________________________________
 void sendMsg(String dataString) {
     strncpy(radioPacket, dataString.c_str(), sizeof(radioPacket));
     rf95.send((uint8_t *)radioPacket, packetSize);
