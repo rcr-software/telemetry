@@ -49,17 +49,17 @@ Adafruit_GPS GPS(&GPSSerial);
 // __________________________________________________________________
 // *** VALUES ***
 
+#define do_waitSignal true                             // Wait for start signal from RX
 #define DEBUG false                                     // Used for debugging purposes
 #define VBATPIN A7                                      // Analog reading of battery voltage
 #define LED 13                                          // LED on Adalogger
 #define SEPARATE A5                                     // Separate Pin - Pull Down Resistor
-unsigned long timeNow,timeLast,delta_t;                 // Time values
+unsigned long timeNow,timeLast,delta_t,radioLog = 0;    // Time values
 char fileName[30];                                      // .csv file, dynamically named "data_#"
 const uint8_t packetSize = 100;                         // Use this value to change the radio packet size
 char radioPacket[packetSize];                           // char array used for radio packet transmission
 float alt0;                                             // Pad altitude
 float gpsLat,gpsLon,gpsSpeed,gpsAlt;                    // GPS values
-bool separation;                                        // Vehicle separation detection boolean
 uint8_t buf[RH_RF95_MAX_MESSAGE_LEN];                   // Used for packet retrieval 
 uint8_t len = sizeof(buf);                              // Used for packet retrieval
 float SeaLvlPressure = 1019.5;                          // NOTE: Update with current sea level pressure
@@ -96,7 +96,7 @@ void setup()  {
     delay(100);
 
     
-//    Check RF95 and Frequency -------------------------------
+    // Check RF95 and Frequency -------------------------------
     // LED will blink red on TX board if init fails
     while(!rf95.init() || !rf95.setFrequency(RF95_FREQ)) {
         digitalWrite(LED,HIGH);
@@ -109,16 +109,27 @@ void setup()  {
     rf95.setTxPower(23, false);
 
     // Wait for Initialize Signal -----------------------------
-    String dataString;
-    while (dataString != "BEGIN STARTUP TX_915") {
-     if (rf95.available())   {
-        if (rf95.recv(buf, &len))   {
-            dataString = String((char*)buf);
+    #if do_waitSignal
+      String dataString;
+      while (dataString != "BEGIN STARTUP TX_915") {
+       if (rf95.available())   {
+          if (rf95.recv(buf, &len))   {
+              dataString = String((char*)buf);
+          }
         }
       }
-    }
+    #endif
+    
+    sendMsg("TX OK: 915MHz");
+    delay(1000);
+    
+    // Initialize GPS ----------------------------------------
 
-    sendMsg("TX OK: 915 MHz");
+    GPS.begin(9600);
+    GPS.sendCommand(PMTK_SET_NMEA_OUTPUT_RMCGGA);
+    GPS.sendCommand(PMTK_SET_NMEA_UPDATE_1HZ);
+
+    sendMsg("GPS Init OK");
     delay(1000);
     
     // Check SD ----------------------------------------------
@@ -143,7 +154,7 @@ void setup()  {
     }
     delay(1000);
     
-    //Check BMP280 ------------------------------------------
+    // Check BMP280 ------------------------------------------
     if (!bmp.begin()) {   
       sendMsg("BMP280 Init Failed");
       while(1);
@@ -151,27 +162,27 @@ void setup()  {
           
     sendMsg("BMP280 Init OK");
     delay(1000);
-          
-    // Initialize GPS ----------------------------------------
 
-    GPS.begin(9600);
-    GPS.sendCommand(PMTK_SET_NMEA_OUTPUT_RMCGGA);
-    GPS.sendCommand(PMTK_SET_NMEA_UPDATE_1HZ);
-
-    sendMsg("GPS Init OK");
-    delay(1000);
-
-    //Wait for Startup Signal -------------------------------
-    sendMsg("Ready to Start");
-    while (dataString != "TX_915 GO FOR LAUNCH") {
-     if (rf95.available())   {
-        if (rf95.recv(buf, &len))   {
+    // Wait for Startup Signal -------------------------------
+    #if do_waitSignal
+      sendMsg("Ready to Start");
+      timeLast = millis();
+      
+      while (dataString != "TX_915 GO FOR LAUNCH") {
+        if (delta_t = (timeNow = millis()) - timeLast >= 60000)  {
+          sprintf(radioPacket, "%.2f:TX_915 Active", float(timeNow)/1000);
+          rf95.send((uint8_t *)radioPacket, packetSize);
+          timeLast = timeNow;
+        }
+        if (rf95.available())   {
+          if (rf95.recv(buf, &len))   {
             dataString = String((char*)buf);
+          }
         }
       }
-    }
+    #endif
     
-    //Initialize rocket variables ----------------------------------
+    // Initialize variables ----------------------------------
     timeLast = millis();
 
 }   // END SETUP
@@ -199,8 +210,9 @@ void loop() {
        return;
    }
   
-   if (delta_t >= 200) {
+   if (delta_t >= 100) {
       timeLast = timeNow;
+      radioLog += delta_t;
       
       // Read Altitude
       float alt = bmp.readAltitude(SeaLvlPressure);
@@ -209,7 +221,7 @@ void loop() {
       float vbat = ((analogRead(VBATPIN))*3.3)/512;  // Convert to voltage  
   
       // Read Separation
-      separation = digitalRead(SEPARATE);
+      bool separation = digitalRead(SEPARATE);
   
       // Read Temperature
       int temperature = bmp.readTemperature();
@@ -228,9 +240,13 @@ void loop() {
       // Save Data to SD File and Radio Transmit
       sprintf(radioPacket, "%.2f,%.2f,%.2f,%.2f,%.4f,%.4f,%.2f,%d,%d", float(timeNow)/1000,alt,gpsAlt,gpsSpeed,gpsLat,gpsLon,vbat,temperature,separation);
       dataFile.println(radioPacket);
-      rf95.send((uint8_t *)radioPacket, packetSize);
-      rf95.waitPacketSent();
-            
+
+      if (radioLog >= 500)  {
+        radioLog = 0;
+        rf95.waitPacketSent();
+        rf95.send((uint8_t *)radioPacket, packetSize);
+      }
+    
       // Close SD File
       dataFile.close();
    }

@@ -55,15 +55,16 @@ Adafruit_GPS GPS(&GPSSerial);
 // __________________________________________________________________
 // *** VALUES ***
 
-#define skip_calibrate false                                    // Skip BNO055 Calibration
-#define DEBUG true                                             // Used for debugging purposes
+#define do_calibrate false                                      // Do BNO055 Calibration
+#define do_waitSignal true                                     // Wait for start signal from RX
+#define debug false                                             // Used for debugging purposes
 #define VBATPIN A7                                              // Analog reading of battery voltage
 #define LED 13                                                  // LED on M0 Feather
 #define SEPARATE A5                                             // Separate Pin - Photoresistor/NPN Switch
 unsigned long timeNow,timeLast,delta_t;                         // Time values
 int dataLog = 0,radioLog = 0;                                   // Data logging time values
 char fileName[30];                                              // .csv file, dynamically named "data_#"
-const int packetSize = 100;                                           // radio packet size - MAX PACKET LENGTH = 251 BYTES
+const int packetSize = 100;                                     // radio packet size - MAX PACKET LENGTH = 251 BYTES
 char radioPacket[packetSize];                                   // Char array used for radio packet transmission
 uint8_t buf[RH_RF95_MAX_MESSAGE_LEN];                           // Used for packet retrieval 
 uint8_t len = sizeof(buf);                                      // Used for packet retrieval
@@ -71,15 +72,9 @@ float alt0;                                                     // Pad altitude
 float velPrev = 0;                                              // Past state velocity
 sensors_event_t event;                                          // LIS3DH Sensor Values
 float gpsLat = 0,gpsLon = 0,gpsSpeed = 0,gpsAlt = 0;            // GPS values
-bool separation;                                                // Vehicle separation detection
-//float avgMotorThrust = 2200;                                    // Newtons
-//float avgVehicleMass = 22.7;                                    // Kilograms
 float SeaLvlPressure = 1012.2;                                  // NOTE: Update with current sea level pressure (hPa)
                                                                 // Go to: https://forecast.weather.gov for Barometer readings
-
-//struct stateStruct  {
-//  float accel;
-//};
+                                                                
 
 
 
@@ -98,10 +93,6 @@ void setup()  {
     digitalWrite(LED,LOW);
 
     Serial.begin(115200);
-
-    //      while(!Serial)  {
-    //        delay(100);
-    //      }
     
     // Radio Module Manual Reset ------------------------------
     digitalWrite(RFM95_RST, LOW);
@@ -120,16 +111,19 @@ void setup()  {
 
     // TX Power set to max
     rf95.setTxPower(23, false);
-    
+
     // Wait for Initialize Signal -----------------------------
-    String dataString;
-    while (dataString != "BEGIN STARTUP TX_862") {
-     if (rf95.available())   {
-        if (rf95.recv(buf, &len))   {
-            dataString = String((char*)buf);
+    #if do_waitSignal
+      String dataString;
+      while (dataString != "BEGIN STARTUP TX_862") {
+       if (rf95.available())   {
+          if (rf95.recv(buf, &len))   {
+              dataString = String((char*)buf);
+          }
         }
       }
-    }
+    #endif
+    
     sendMsg("TX OK: 862MHz");
     delay(1000);
     
@@ -158,7 +152,7 @@ void setup()  {
         rf95.send((uint8_t *)radioPacket, packetSize);
 
         dataFile = SD.open(fileName,FILE_WRITE);
-        dataFile.println("Time,Alt,rawVel,filtVel,Accel,Lat,Lon,Vbat,Temp,Sep,Gravity,Linear,gpsSpeed,gpsAlt");
+        dataFile.println("Time,Alt,Vel,Accel,Lat,Lon,Vbat,Temp,Sep,Lx,Ly,Lz,Linear,Gx,Gy,Gz,Gravity,d_alt,gpsSpeed,gpsAlt");
         dataFile.close();
         break;
       }
@@ -177,13 +171,13 @@ void setup()  {
     uint8_t system, gyro, accel, mag; // Used to calibrate BNO055
     system = gyro = accel = mag = 0;
 
-    #if skip_calibrate
-        while(!bno.isFullyCalibrated()) {
-            bno.getCalibration(&system, &gyro, &accel, &mag);
-            sprintf(radioPacket, "S:%d G:%d A:%d M:%d",system,gyro,accel,mag);
-            rf95.send((uint8_t *)radioPacket, packetSize);
-            delay(500);
-        }
+    #if do_calibrate
+      while(!bno.isFullyCalibrated()) {
+          bno.getCalibration(&system, &gyro, &accel, &mag);
+          sprintf(radioPacket, "S:%d G:%d A:%d M:%d",system,gyro,accel,mag);
+          rf95.send((uint8_t *)radioPacket, packetSize);
+          delay(500);
+      }
     #endif
 
     sendMsg("BNO055 Init OK");
@@ -209,14 +203,23 @@ void setup()  {
     delay(1000);
 
     // Wait for Start Signal ---------------------------------
-    sendMsg("Ready to Start");
-    while (dataString != "TX_862 GO FOR LAUNCH") {
-     if (rf95.available())   {
-        if (rf95.recv(buf, &len))   {
+    #if do_waitSignal
+      sendMsg("Ready to Start");
+      timeLast = millis();
+      
+      while (dataString != "TX_862 GO FOR LAUNCH") {
+      if (delta_t = (timeNow = millis()) - timeLast >= 60000)  {
+        sprintf(radioPacket, "%.2f:TX_862 Active", float(timeNow)/1000);
+        rf95.send((uint8_t *)radioPacket, packetSize);
+        timeLast = timeNow;
+      }
+       if (rf95.available())   {
+          if (rf95.recv(buf, &len))   {
             dataString = String((char*)buf);
+          }
         }
       }
-    }
+    #endif
 
     // Initialize variables -----------------------------------
     timeLast = millis();
@@ -230,11 +233,11 @@ void setup()  {
 
 
 
-// ________________________________________________________________________________________
-//                                   *** LOOP ***
-//                          Will send TX packet containing: 
-// [Time, Altitude, Velocity, Acceleration, GPS Lat & Lon, Battery Voltage, and Separation]
-// ________________________________________________________________________________________
+// _____________________________________________________________________________________________________
+//                                          *** LOOP ***
+//                                Will send TX packet containing: 
+// [Time, Altitude, Velocity, Acceleration, GPS Lat & Lon, Battery Voltage, Temperature, and Separation]
+// _____________________________________________________________________________________________________
 void loop() {
     // TIMESTAMP:
     delta_t = (timeNow = millis()) - timeLast;
@@ -280,22 +283,26 @@ void loop() {
         
       // Velocity Calculations
       // v = vo + at
-      float vel = velPrev + (accel * (delta_t/1000));
+      float vel = velPrev + (accel * (float(delta_t)/1000));
       velPrev = vel;
+      if (delta_alt <= 3)  {
+        velPrev = 0;  // On launch pad
+      }
       
       // Data Transmission
       dataLog += delta_t;
       if (dataLog >= 100) {
+          radioLog += dataLog;
           dataLog = 0;
         
           // Read Battery Voltage
           float vbat = ((analogRead(VBATPIN))*3.3)/512;  // Convert to voltage  
       
           // Read Separation
-          separation = digitalRead(SEPARATE);
+          bool separation = digitalRead(SEPARATE);
       
           // Read Temperature
-          int temperature = bmp.readTemperature();
+          float temperature = bmp.readTemperature();
           
           // Read GPS coordinates if location is fixed
           if (GPS.fix)  {
@@ -308,40 +315,53 @@ void loop() {
           // Open SD File
           dataFile = SD.open(fileName,FILE_WRITE);
 
-          // Save data to SD file and radio transmit every ~0.1 sec
-          snprintf(radioPacket,packetSize, "%.2f,%.2f,%.2f,%.2f,%.4f,%.4f,%.2f,%d", float(timeNow)/1000,alt,vel,accel,gpsLat,gpsLon,vbat,separation);
+          // Save data to SD file every ~0.1 sec and radio transmit every ~0.5 sec
+          sprintf(radioPacket, "%.2f,%.2f,%.2f,%.2f,%.4f,%.4f,%.2f,%.1f,%d", float(timeNow)/1000,alt,vel,accel,gpsLat,gpsLon,vbat,temperature,separation);
           dataFile.print(radioPacket);
-          rf95.send((uint8_t *)radioPacket, packetSize);
-          rf95.waitPacketSent();            //does this need to have delay to ensure it doesn't hang?
-          snprintf(radioPacket,packetSize, ",%.2f,%.2f,%.2f,%.2f,%d", gravity,linear,gpsSpeed,gpsAlt,temperature);
+
+          if (radioLog >= 500)  {
+            radioLog = 0;
+            rf95.send((uint8_t *)radioPacket, packetSize);
+            rf95.waitPacketSent();
+          }
+
+          sprintf(radioPacket, ",%.2f,%.2f,%.2f,%.2f,%.2f,%.2f,%.2f,%.2f,%.2f,%.2f,%.2f", lx,ly,lz,linear,gx,gy,gz,gravity,delta_alt,gpsAlt,gpsSpeed);
           dataFile.println(radioPacket);
           
           // Close SD File
           dataFile.close();
+
+          #if debug
+            Serial.print("time:");
+            Serial.print(float(timeNow)/1000);
+            Serial.print(" delta_t:");
+            Serial.println(delta_t);
+            Serial.print("radioLog:");
+            Serial.println(radioLog);
+            Serial.print("accel:");
+            Serial.println(accel);
+            Serial.print("lx:");
+            Serial.print(lx);
+            Serial.print(" ly:");
+            Serial.print(ly); 
+            Serial.print(" lz:");
+            Serial.println(lz);
+            Serial.print("gx:");
+            Serial.print(gx);
+            Serial.print(" gy:");
+            Serial.print(gy);
+            Serial.print(" gz:");
+            Serial.println(gz);
+            Serial.print("vel:");
+            Serial.println(vel);
+            Serial.print("alt:");
+            Serial.print(alt);
+            Serial.print(" delta_alt:");
+            Serial.println(delta_alt);
+            Serial.print("sep:");
+            Serial.println(separation);
+          #endif
       }
-    
-      #if DEBUG
-        Serial.print("delta_t:");
-        Serial.println(delta_t);
-        Serial.print("accel:");
-        Serial.println(accel);
-        Serial.print("lx:");
-        Serial.print(lx);
-        Serial.print(" ly:");
-        Serial.print(ly);
-        Serial.print(" lz:");
-        Serial.println(lz);
-        Serial.print("gx:");
-        Serial.print(gx);
-        Serial.print(" gy:");
-        Serial.print(gy);
-        Serial.print(" gz:");
-        Serial.println(gz);
-        Serial.print("vel:");
-        Serial.println(vel);
-        Serial.print("alt:");
-        Serial.println(alt);
-      #endif
    }
 }
 
